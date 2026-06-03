@@ -1,921 +1,358 @@
-<p align="center">
-  <img src="public/logo512.png" alt="DreamProperty Logo" width="120" />
-</p>
+# Fortress Protocol — Unified System Documentation
 
-<h1 align="center">🏠 DreamProperty</h1>
-
-<p align="center">
-  <strong>Tokenized Real Estate Investment Platform — Powered by Blockchain, Web3 & DeFi</strong>
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/version-0.1.3-blue" alt="Version" />
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
-  <img src="https://img.shields.io/badge/solidity-0.8.20-purple" alt="Solidity" />
-  <img src="https://img.shields.io/badge/react-18.3-61DAFB" alt="React" />
-  <img src="https://img.shields.io/badge/node-18+-339933" alt="Node" />
-  <img src="https://img.shields.io/badge/status-MVP-orange" alt="Status" />
-</p>
+> **A neobank for AI agents.** Savings side (AceVaults) earns yield. Spending side (EMEI) moves money. Intelligence layer (fortress-engine) manages risk.
 
 ---
 
-## Table of Contents
+## System Architecture
 
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Tech Stack](#tech-stack)
-- [Project Structure](#project-structure)
-- [Smart Contracts](#smart-contracts)
-- [Frontend Application](#frontend-application)
-- [Backend API](#backend-api)
-- [Authentication Flow](#authentication-flow)
-- [Deployment](#deployment)
-- [Getting Started](#getting-started)
-- [Environment Variables](#environment-variables)
-- [Gap Analysis & Known Issues](#-gap-analysis--known-issues)
-- [Roadmap](#roadmap)
-- [Contributing](#contributing)
-- [License](#license)
+```mermaid
+flowchart TB
+    subgraph Users["👤 Users (Privy Embedded Wallets)"]
+        U1["Alice (0xUserAlice)"]
+        U2["Bob (0xUserBob)"]
+    end
+
+    subgraph Agents["🤖 Agents (Privy Server Wallets)"]
+        A1["Charlie (0xAgentCharlie)"]
+        A2["Delta (0xAgentDelta)"]
+    end
+
+    U1 -->|"Owns"| A1
+    U2 -->|"Owns"| A2
+
+    subgraph EMEI["💳 EMEI — Spending Side"]
+        INV["EMEIInvoice"]
+        MAN["EMEIMandate"]
+        SET["EMEISettlement"]
+        REC["EMEIReceipt"]
+        BAY["Bay8004 (Reputation)"]
+        FAC["Rust Facilitator (Axum)"]
+    end
+
+    subgraph Vaults["🏦 AceVaults — Savings Side"]
+        CON["Conservative Satellite (Aave/Morpho ~3% APY)"]
+        YLD["Yield Satellite (Uni/Aero/Pendle ~15% APY)"]
+        BV["BaseVault + Adapters"]
+    end
+
+    subgraph Engine["⚙️ fortress-engine — Intelligence"]
+        AGENTS["Cartographer + Sentinel + Strategist"]
+        OP["Operator (rebalance trigger)"]
+        ATT["AttestationRegistry (0G)"]
+    end
+
+    A1 & A2 -->|"Invoice / Pay / Mandate"| EMEI
+    SET -->|"≤ Sweep Limit"| CON
+    SET -->|"> Sweep Limit"| YLD
+    A1 -->|"frtUSD shares"| CON & YLD
+    A2 -->|"frtUSD shares"| CON & YLD
+    AGENTS --> ATT
+    OP --> CON & YLD
+```
 
 ---
 
-## Overview
+## The Three Layers
 
-**DreamProperty** is a Web3-native real estate investment platform that enables fractional property ownership through NFT tokenization. Users can browse properties, invest with as little as $10, and earn passive rental income — all powered by smart contracts on Ethereum/Polygon.
+### 1. AceVaults (Savings) — 5-Line Summary
+1. **Satellite** is the ERC-4626 hub vault; users deposit USDC and receive frtUSD shares.
+2. **BaseVault** manages N underlying protocol positions (Morpho, Aave, Compound) with weighted allocation.
+3. **Adapters** (Local, UniV2, Aerodrome, CCTP, Pendle, GMX) route capital to DeFi strategies.
+4. **AttestationRelay** + **SentinelRegistry** enforce a 15-min review window + Sentinel veto before rebalance.
+5. **Fees**: 0.75% annual management + 15% performance (per-depositor HWM) + configurable PSM fees.
 
-Key capabilities:
-- **Fractional Ownership** — Properties tokenized as ERC-721 NFTs with RWA (Real World Asset) ERC-20 backing
-- **3D Property Visualization** — Interactive Three.js/React Three Fiber property walkthroughs
-- **DeFi Primitives** — Lending vaults, yield farming, and cross-chain token bridging
-- **KYC/Identity** — Onfido-powered identity verification with Soulbound NFT credentials
-- **Multi-Chain** — RPC configs for 16+ EVM chains (Ethereum, Polygon, BSC, Arbitrum, Avalanche, etc.)
-- **PWA Support** — Service worker with stale-while-revalidate caching strategy
+### 2. fortress-engine (Intelligence) — 5-Line Summary
+1. Three AI agents (Cartographer, Sentinel, Strategist) produce signed allocation signals every 5 minutes.
+2. Signals are Merkle-hashed, uploaded to 0G Storage, and attested on-chain.
+3. An Operator loop polls every 60s and fires `Satellite.rebalance()` after the 15-min review window.
+4. Sentinel publishes per-protocol risk flags (GREEN→BLACK) and a veto bitmap blocking flagged protocols.
+5. Data is ingested from DeFiLlama + Chainlink; curators are scored and feed into allocation decisions.
+
+### 3. EMEI (Spending) — 5-Line Summary
+1. **EMEIInvoice** manages invoice lifecycle (ISSUED→PRESENTED→PAID/OVERDUE/REJECTED) with reputation gating.
+2. **EMEIMandate** grants programmable spending allowances (cap/who/what/when) for autonomous agent collection.
+3. **EMEISettlement** splits USDC between Conservative + Yield vaults using per-agent sweep limits + shared buffer.
+4. **EMEIReceipt** anchors Merkle roots of settled payments for trustless verification.
+5. **Rust Facilitator** runs auto-collector, overdue scanner, receipt batcher, tx-sender pool — all gas-sponsored.
 
 ---
 
-## Architecture
+## Key Design Decisions
 
-### System Architecture
+### 1. Sub-Accounting: Agent Wallets Hold Shares Directly
+- `EMEISettlement` calls `Satellite.deposit(amount, agentWallet)` — frtUSD shares go to the agent's Privy Server Wallet.
+- Performance fees calculated per-agent (individual HWM), not aggregate.
+- Redemptions signed by backend via Privy Server API credentials.
 
-```mermaid
-graph TB
-    subgraph Client["Frontend (React 18 + Vite)"]
-        UI[UI Components]
-        R3F[React Three Fiber - 3D Views]
-        Redux[Redux Toolkit Store]
-        RTK[RTK Query API Layer]
-        Ethers[ethers.js v5]
-    end
+### 2. Tranche Selection: Automated Treasury Sweeping
+- Owner sets a **Sweep Limit** per agent (e.g., 500 USDC).
+- Below limit → Conservative Satellite (liquid, instant spending).
+- Above limit → Yield Satellite (high APY, less liquid).
+- When spendable drops below limit → auto-top-up redeems from Yield.
 
-    subgraph Backend["API Server (Express 5)"]
-        Routes[REST Routes]
-        Auth[JWT Auth Middleware]
-        Controllers[Controllers]
-        Cloudinary[Cloudinary SDK]
-    end
+### 3. Liquidity: Shared EMEI Buffer Pool
+- 5% of swept-to-Yield funds retained idle in EMEISettlement.
+- Payments exceeding spendable balance **loaned instantly** from the buffer.
+- Async Yield Satellite redemption replenishes the pool.
 
-    subgraph Database["Data Layer"]
-        MongoDB[(MongoDB via Mongoose)]
-    end
+---
 
-    subgraph Blockchain["Smart Contract Layer"]
-        NFT[RealEstateNFT - ERC-721]
-        RWA[RWAAssetToken - ERC-20]
-        Lending[LendingVault]
-        Yield[YieldVault]
-        Payment[RealEstatePayment]
-        Bridge[Sender / Receiver]
-    end
-
-    subgraph Identity["Identity & KYC"]
-        Wallet[MetaMask Wallet]
-        SBT[Soulbound NFT]
-        Onfido[Onfido SDK]
-    end
-
-    UI --> Redux
-    Redux --> RTK
-    RTK -->|HTTP| Routes
-    UI --> Ethers
-    Ethers -->|JSON-RPC| Blockchain
-    Routes --> Auth
-    Auth --> Controllers
-    Controllers --> MongoDB
-    Controllers --> Cloudinary
-    Wallet --> Ethers
-    Onfido --> UI
-    R3F --> UI
-```
-
-### Frontend State Architecture
+## Payment Flow
 
 ```mermaid
-graph LR
-    subgraph Store["Redux Store"]
-        API[apiSlice - RTK Query]
-        AuthS[authSlice]
-        IdS[identitySlice]
-        CredS[credentialsSlice]
-        KycS[kycSlice]
-        BridgeS[bridgeSlice]
-    end
+sequenceDiagram
+    participant P as 💰 Payer Agent
+    participant E as 💳 EMEISettlement
+    participant C as 🏦 Conservative Satellite
+    participant Y as 📈 Yield Satellite
+    participant B as 💧 Buffer Pool
+    participant R as 🛰️ Receiver Agent
 
-    subgraph Slices["API Slices (Injected)"]
-        AuthAPI[authApiSlice]
-        IdAPI[identityApiSlice]
-        CredAPI[credentialsApiSlice]
-        KycAPI[kycApiSlice]
-        BridgeAPI[bridgeApiSlice]
-    end
+    Note over E: Agent gets paid 1,500 USDC (Sweep Limit: 500)
+    E->>C: deposit(500 USDC, receiver)
+    E->>Y: deposit(950 USDC, receiver)
+    E->>B: retain(50 USDC → buffer)
 
-    AuthAPI -->|injects into| API
-    IdAPI -->|injects into| API
-    CredAPI -->|injects into| API
-    KycAPI -->|injects into| API
-    BridgeAPI -->|injects into| API
+    Note over E: Agent pays 700 USDC invoice
+    P->>E: settle(invoiceId, payer, payee, 700)
+    E->>C: redeem(500 USDC from payer)
+    E->>B: loan(200 USDC from buffer)
+    E->>R: transfer(700 USDC)
+    Note over E: Background: redeem 200 from Yield → repay buffer
 ```
 
-### Smart Contract Relationships
+---
+
+## User Flow: One User, Multiple Agents
 
 ```mermaid
-graph TD
-    RWA[RWAAssetToken<br/>ERC-20 + Ownable]
-    NFT[RealEstateNFT<br/>ERC-721 + Ownable]
-    LV[LendingVault<br/>Collateral + Borrow]
-    YV[YieldVault<br/>Stake + Claim]
-    PAY[RealEstatePayment<br/>Direct ETH Purchase]
-    SEND[Sender]
-    RECV[Receiver]
-    PU[PriceUtils Library]
-
-    RWA --> LV
-    RWA --> YV
-    SEND -->|transfer ETH| RECV
-    PU -.->|utility| RWA
-    NFT -.->|badge verification| NFT
+flowchart TD
+    A["👤 Alice signs in via Privy"] --> B["Embedded wallet (0xUserAlice) created"]
+    B --> C["Creates Agent Charlie (Server Wallet 0xAgentCharlie)"]
+    B --> D["Creates Agent Dave (Server Wallet 0xAgentDave)"]
+    C --> E["Alice sets sweep limit: 500 USDC for Charlie"]
+    D --> F["Alice sets sweep limit: 500 USDC for Dave"]
+    E --> G["Charlie earns 1,500 USDC from a job"]
+    G --> H["EMEISettlement splits: 500 Conservative + 950 Yield + 50 Buffer"]
+    H --> I["Charlie pays Dave 700 USDC for SEO work"]
+    I --> J["500 from Conservative + 200 loan from Buffer"]
+    J --> K["Dave receives 700 USDC instantly"]
+    K --> L["Dave's funds split per his sweep limit"]
+    L --> M["Background: Yield redemption repays buffer"]
 ```
+
+---
+
+## User Flow: Multiple Users, Multiple Agents
+
+```mermaid
+sequenceDiagram
+    participant Alice as 👤 Alice
+    participant Charlie as 🤖 Charlie (Alice's Agent)
+    participant Bob as 👤 Bob
+    participant Delta as 🤖 Delta (Bob's Agent)
+    participant E as 💳 EMEISettlement
+    participant V as 🏦 Vaults
+
+    Alice->>Charlie: Set sweep limit: 1,000 USDC
+    Bob->>Delta: Set sweep limit: 1,000 USDC
+
+    Note over Charlie,Delta: Charlie buys data analysis from Delta (1,200 USDC)
+    Charlie->>E: pay(invoiceId, 1200 USDC)
+    E->>E: 1,000 from Charlie Conservative + 200 from Buffer
+    E->>Delta: 1,200 USDC received
+    E->>V: Split per Delta's sweep limit
+    Note over E: Background: redeem 200 from Charlie's Yield → repay buffer
+
+    Note over Delta: Delta pays Vercel 100 USDC via x402
+    Delta->>E: pay(invoiceId, 100 USDC)
+    E->>E: 100 from Delta Conservative
+    E->>E: Auto-top-up: redeem 100 from Delta Yield → Conservative
+```
+
+---
+
+## Deployed Contracts
+
+### Base Mainnet (Chain ID: 8453) — AceVaults
+
+| Contract | Proxy Address |
+|----------|---------------|
+| Satellite (frtUSD-C) | `0x1493522095857A3e28e6573E8a1f6b612dd30B40` |
+| BaseVault | `0x34bce6998d3599B665Ec36b205ab1d91F23f2b4D` |
+| LocalAdapter | `0x6f9eDe63115707bF01403f12f63Fa5e4616BB47A` |
+| UniswapV2Adapter | `0x220C82bF47cD376f9B71d038Ca45aC6E98482CC0` |
+| AerodromeVAMMAdapter | `0xA988a2d0412FC21020dc875691eD73c016B1b408` |
+| AttestationRelay | `0x1f2Bda259365BF10210AB6C8C0F4A211eE2be5FC` |
+
+### 0G Chain (Chain ID: 16661)
+
+| Contract | Address |
+|----------|---------|
+| AttestationRegistry | `0x252709C4569E096BD4babe3be9175Ca2F49f152F` |
+| SentinelRegistry | `0xe53B912e3199250Ce03e7eBCe89f2bE79Ba0895d` |
+
+### EMEI — Pending Redeployment to Base
+
+| Contract | Current (Mantle Sepolia) | Target (Base) |
+|----------|--------------------------|---------------|
+| EMEIInvoice | `0xC35f709255D7199394655F16008e8d1A3AD80005` | TBD |
+| EMEIMandate | `0xF48C3bd4FE046629A9c12A39693f39c297893bD8` | TBD |
+| EMEISettlement | `0xfdCb7bA077069A7Da44711Ee6bdB49174AFA4dD0` | TBD |
+| EMEIReceipt | `0x558a20766d5998765B056597b8b78fe1914f3969` | TBD |
+| Bay8004 | `0xE61B57D84fb55E2601ab47B83c367612E348d409` | TBD |
+| MockERC8004 | `0x4B560970423B08632bC2Aa31D0a70e29e66Fca37` | TBD |
 
 ---
 
 ## Tech Stack
 
-| Layer | Technology | Version |
-|-------|-----------|---------|
-| **Frontend Framework** | React | 18.3.1 |
-| **Build Tool** | Vite | 5.4.2 |
-| **Styling** | TailwindCSS | 3.4.1 |
-| **State Management** | Redux Toolkit + RTK Query | 2.8.2 |
-| **Atomic State** | Jotai | 2.4.2 |
-| **3D Rendering** | Three.js + React Three Fiber | 0.153.0 / 8.13.3 |
-| **Animations** | Framer Motion | 12.4.10 |
-| **Routing** | React Router DOM | 7.3.0 |
-| **Blockchain** | ethers.js | 5.8.0 |
-| **Backend** | Express.js | 5.1.0 |
-| **Database** | MongoDB (Mongoose) | 8.14.3 |
-| **Image Storage** | Cloudinary | 2.6.1 |
-| **Auth** | JWT (jsonwebtoken) | 9.0.2 |
-| **KYC** | Onfido SDK | CDN-loaded |
-| **Smart Contracts** | Solidity | 0.8.20 |
-| **Contract Tooling** | Hardhat | (devDep) |
-| **Containerization** | Docker (nginx) | Node 18 + Alpine |
-
----
-
-## Project Structure
-
-```
-dreamproperty/
-├── api/                          # Express.js Backend
-│   ├── index.js                  # Server entry — port 8080
-│   ├── config/
-│   │   ├── constant.js           # 16 EVM chain RPC endpoints
-│   │   ├── getContract.js        # Chain-specific contract callers
-│   │   ├── GlobalStateContract.js
-│   │   ├── web3Config_AGNG.js    # Peaq Agung testnet config
-│   │   └── web3Config_SEPOLIA.js # Sepolia testnet config
-│   ├── controllers/
-│   │   ├── property.controller.js # CRUD + Cloudinary upload
-│   │   └── user.controller.js     # User CRUD
-│   ├── middleware/
-│   │   ├── auth.js               # JWT verification + chain callers
-│   │   └── checkObjectId.js      # MongoDB ObjectId validator
-│   ├── mongodb/
-│   │   ├── connect.js            # Mongoose connection
-│   │   └── models/
-│   │       ├── property.js       # Property schema
-│   │       └── user.js           # User schema
-│   └── routes/
-│       ├── property.routes.js    # GET/POST/PATCH/DELETE
-│       └── user.routes.js        # GET/POST
-│
-├── contracts/                    # Solidity Smart Contracts
-│   ├── RealEstateNFT.sol         # ERC-721 building badge NFT
-│   ├── RWAAssetToken.sol         # ERC-20 RWA token
-│   ├── LendingVault.sol          # Collateralized lending
-│   ├── YieldVault.sol            # Staking + yield distribution
-│   ├── RealEstatePayment.sol     # Direct ETH property purchase
-│   ├── Receiver.sol              # ETH receiver contract
-│   ├── sender.sol                # ETH sender contract
-│   └── utils/
-│       └── PriceUtils.sol        # Token price calculation library
-│
-├── scripts/                      # Hardhat deployment scripts
-│   ├── deploy.js                 # Full deployment pipeline
-│   ├── deployReceiver.js         # Receiver-only deployment
-│   └── sendEther.js              # ETH transfer test script
-│
-├── src/                          # React Frontend
-│   ├── main.jsx                  # App entry point
-│   ├── App.jsx                   # Router + Provider setup
-│   ├── ThemeSwitcher.jsx         # Dark/light mode toggle
-│   ├── app/
-│   │   ├── store.js              # Redux store configuration
-│   │   └── api.js                # RTK Query base API slice
-│   ├── components/
-│   │   ├── CustomCursor.jsx      # Animated cursor effect
-│   │   ├── WalletConnect.jsx     # MetaMask wallet integration
-│   │   ├── auth/
-│   │   │   └── RequireAuth.jsx   # Protected route guard
-│   │   ├── layout/
-│   │   │   ├── AppLayout.jsx     # Dashboard layout shell
-│   │   │   ├── Footer.jsx
-│   │   │   ├── Navbar.jsx        # Main navigation bar
-│   │   │   └── ProfileNavbar.jsx # Dashboard navigation
-│   │   └── property/
-│   │       ├── Experience.jsx    # 3D scene orchestrator
-│   │       ├── Overlay.jsx       # 3D UI overlay
-│   │       └── Scene.jsx         # GLB model renderer
-│   ├── consts/
-│   │   └── ProfileSidebarMenu.jsx
-│   ├── features/
-│   │   ├── auth/                 # Auth state + API
-│   │   ├── bridge/               # Cross-chain bridge state + API
-│   │   ├── credentials/          # Verifiable credentials state + API
-│   │   ├── identity/             # DID identity state + API
-│   │   └── kyc/                  # KYC verification state + API
-│   ├── hooks/
-│   │   └── useTheme.js           # Theme class toggler
-│   ├── pages/
-│   │   ├── Home.jsx              # Landing page (617 lines)
-│   │   ├── Properties.jsx        # Property listing
-│   │   ├── PropertyDetail.jsx    # Single property view
-│   │   ├── Property3D.jsx        # 3D property viewer
-│   │   ├── About.jsx
-│   │   ├── Blog.jsx / BlogPost.jsx
-│   │   ├── FAQ.jsx
-│   │   ├── Privacy.jsx
-│   │   ├── NotFound.jsx
-│   │   └── profile/              # Authenticated dashboard
-│   │       ├── index.jsx         # Profile route config
-│   │       ├── DashboardPage.jsx
-│   │       ├── CreateIdentityPage.jsx
-│   │       ├── CredentialPage.jsx
-│   │       ├── CredentialDetailPage.jsx
-│   │       ├── KycPage.jsx
-│   │       ├── OnfidoVerificationPage.jsx
-│   │       ├── BridgePage.jsx
-│   │       └── WalletConnectPage.jsx
-│   ├── services/
-│   │   ├── contractService.js    # Blockchain contract interactions
-│   │   └── onfidoService.js      # Onfido KYC SDK wrapper
-│   └── styles/
-│       ├── dark-theme.css
-│       └── onfido.css
-│
-├── public/
-│   ├── models/
-│   │   └── house1.glb            # 3D house model (824KB)
-│   ├── service-worker.js         # PWA service worker
-│   └── manifest.json             # PWA manifest
-│
-├── Dockerfile                    # Multi-stage: node build → nginx serve
-├── hardhat.config.js             # Solidity 0.8.20, localhost network
-├── vite.config.js                # COEP/COOP headers for WASM
-├── tailwind.config.js            # Custom color palette + Inter font
-├── package.json
-├── CODE_OF_CONDUCT.md
-└── CONTRIBUTING.md
-```
-
----
-
-## Smart Contracts
-
-### RealEstateNFT.sol (ERC-721)
-Building verification badge system. Each property gets a soulbound-style badge NFT with verification status that **resets on transfer**.
-
-| Function | Access | Description |
-|----------|--------|-------------|
-| `issueBadge()` | Owner | Mint NFT with building metadata |
-| `verifyBuilding()` | Owner | Mark badge as verified |
-| `revokeVerification()` | Owner | Revoke verification status |
-| `getBuildingBadge()` | Public | Read badge details |
-| `isVerified()` | Public | Check verification status |
-
-### RWAAssetToken.sol (ERC-20)
-Standard ERC-20 with initial supply minted to deployer. Serves as the base token for DeFi vaults.
-
-### LendingVault.sol
-Collateralized lending with 60% LTV ratio. Deposit RWA tokens as collateral → borrow against them.
-
-### YieldVault.sol
-Stake RWA tokens → admin distributes yield → users claim rewards.
-
-### RealEstatePayment.sol
-Simple one-shot ETH payment contract. Buyer sends exact property price, ETH transfers to builder.
-
-### Sender.sol / Receiver.sol
-ETH transfer pair for cross-contract payment forwarding.
-
----
-
-## Frontend Application
-
-### Route Map
-
-| Path | Component | Auth Required |
-|------|-----------|:---:|
-| `/` | Home | ✗ |
-| `/properties` | Properties | ✗ |
-| `/properties/:id` | PropertyDetail | ✗ |
-| `/property-3d` | Property3D | ✗ |
-| `/about` | About | ✗ |
-| `/faq` | FAQ | ✗ |
-| `/blog` | Blog | ✗ |
-| `/blog/:slug` | BlogPost | ✗ |
-| `/privacy` | Privacy | ✗ |
-| `/profile/` | DashboardPage | ✓ |
-| `/profile/dashboard` | DashboardPage | ✓ |
-| `/profile/identity/create` | CreateIdentityPage | ✓ |
-| `/profile/credentials` | CredentialsPage | ✓ |
-| `/profile/credentials/:hash` | CredentialDetailPage | ✓ |
-| `/profile/kyc` | KycPage | ✓ |
-| `/profile/kyc/verify` | OnfidoVerificationPage | ✓ |
-| `/profile/bridge` | BridgePage | ✓ |
-
-### Key Features
-- **3D Property Viewer** — GLB model rendering with orbit controls, auto-rotation, and accumulative shadows
-- **Custom Cursor** — Animated dual-ring cursor with hover state detection
-- **Theme System** — Dark/light toggle with localStorage persistence
-- **PWA** — Service worker + manifest for installable web app
-- **Framer Motion** — Scroll-triggered animations throughout
-
----
-
-## Backend API
-
-### Endpoints
-
-| Method | Path | Auth | Description |
-|--------|------|:----:|-------------|
-| `GET` | `/` | ✗ | Health check |
-| `GET` | `/api/v1/properties` | ✗ | List properties (paginated, filterable) |
-| `GET` | `/api/v1/properties/:id` | ✗ | Get property detail |
-| `POST` | `/api/v1/properties` | ✗ | Create property (Cloudinary upload) |
-| `PATCH` | `/api/v1/properties/:id` | ✗ | Update property |
-| `DELETE` | `/api/v1/properties/:id` | ✗ | Delete property |
-| `GET` | `/api/v1/users` | ✓ | List users |
-| `POST` | `/api/v1/users` | ✓ | Create user |
-| `GET` | `/api/v1/users/:id` | ✓ | Get user by ID |
-
-### Database Models
-
-**Property**: `title`, `description`, `propertyType`, `location`, `price`, `photo`, `creator` (ref → User)
-
-**User**: `name`, `email`, `avatar`, `allProperties[]` (ref → Property)
-
----
-
-## Authentication Flow
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant MM as MetaMask
-    participant FE as Frontend
-    participant BE as Backend API
-
-    U->>FE: Click "Connect Wallet"
-    FE->>MM: eth_requestAccounts
-    MM-->>FE: walletAddress
-    FE->>BE: POST /auth/challenge {walletAddress, chain}
-    BE-->>FE: {challenge}
-    FE->>MM: signMessage(challenge)
-    MM-->>FE: signature
-    FE->>BE: POST /auth/verify {walletAddress, signature, chain}
-    BE-->>FE: {token, user}
-    FE->>FE: Store JWT in localStorage + Redux
-    FE->>FE: Navigate to /dashboard
-```
-
-> **Note**: The auth API endpoints (`/auth/challenge`, `/auth/verify`) are defined in the frontend RTK Query slice but **do not have corresponding backend routes implemented**.
-
----
-
-## Deployment
-
-### Docker (Frontend Only)
-
-```dockerfile
-# Multi-stage build
-FROM node:18 as builder    →  npm install + vite build
-FROM nginx:mainline-alpine →  serve /dist on port 80
-```
-
-```bash
-docker build -t dreamproperty .
-docker run -p 80:80 dreamproperty
-```
-
-### Hardhat Contracts
-
-```bash
-npx hardhat compile
-npx hardhat run scripts/deploy.js --network localhost
-```
-
-The deploy script deploys: `RealEstateNFT` → `Sender` → `RWAAssetToken` → `YieldVault` → `LendingVault`
-
----
-
-## Getting Started
-
-```bash
-# Clone
-git clone https://github.com/klasmalabs/property-mvp.git
-cd property-mvp
-
-# Install
-npm install
-
-# Frontend dev server (port 5173)
-npm start
-
-# Backend API server (port 8080)
-npm run api
-
-# Build for production
-npm run build
-```
+| Layer | Technology |
+|-------|-----------|
+| Smart Contracts | Solidity 0.8.24, Foundry, OpenZeppelin |
+| Facilitator Backend | Rust, Axum, alloy-rs, tokio |
+| Intelligence Engine | TypeScript, Node.js |
+| Database | PostgreSQL (tx queue), Redis (nonce mgmt, events) |
+| Auth / Custody | Privy (Embedded + Server Wallets) |
+| Chain | Base Mainnet (8453), 0G (16661) |
+| Settlement Asset | USDC (6 decimals) |
 
 ---
 
 ## Environment Variables
 
-```env
-# Backend
-MONGODB_URL=mongodb+srv://...
-CLOUDINARY_CLOUD_NAME=
-CLOUDINARY_API_KEY=
-CLOUDINARY_API_SECRET=
-
-# Frontend (prefix with VITE_)
-VITE_API_URL=http://localhost:8000/api
-VITE_CUSTOM_CURSOR_HIDE=true
-
-# Hardhat
-RECEIVER_ADDRESS=0x...
-```
-
----
-
-## ⚠ Gap Analysis & Known Issues
-
-### 🔴 Critical — Security
-
-| # | Issue | Location | Impact |
-|---|-------|----------|--------|
-| 1 | **Hardcoded JWT secret** `"hello"` | `api/middleware/auth.js:96` | Full auth bypass. Must use env var with 256-bit random secret |
-| 2 | **Infura API key exposed** in source | `api/config/constant.js` | Key leaked in Git history. Must use env vars |
-| 3 | **Contract addresses hardcoded** with trailing whitespace | `src/services/contractService.js:28` | Will cause transaction failures |
-| 4 | **No .env file exists** | Project root | No secrets management at all |
-| 5 | **Property routes unprotected** | `api/index.js:21` | Anyone can create/update/delete properties without auth |
-| 6 | **No input validation/sanitization** | All controllers | SQL injection & XSS vectors via MongoDB query injection |
-| 7 | **CORS wide open** | `api/index.js:13` | `cors()` with no origin restriction |
-
-### 🔴 Critical — Broken Functionality
-
-| # | Issue | Location | Impact |
-|---|-------|----------|--------|
-| 8 | **Auth endpoints don't exist** on backend | Frontend calls `/auth/challenge` and `/auth/verify` — no backend routes | Wallet login is completely broken |
-| 9 | **Frontend API port mismatch** | Frontend: `localhost:8000`, Backend: port `8080` | API calls will fail |
-| 10 | **`checkObjectId` uses CommonJS** (`require`) in ESM project | `api/middleware/checkObjectId.js` | Will crash if imported |
-| 11 | **`getContract.js` uses CommonJS** imports in ESM context | `api/config/getContract.js` | Module system conflict |
-| 12 | **`web3Config_*.js` use CommonJS** | `api/config/web3Config_*.js` | Mixed module systems will crash |
-| 13 | **Deprecated `document.remove()`** used | `api/controllers/property.controller.js:140` | Should use `deleteOne()` (Mongoose 7+) |
-| 14 | **Missing 3D model files** | `Scene.jsx` preloads `house2c.glb` and `house3c.glb` | Only `house1.glb` exists — 404 errors |
-| 15 | **Missing HDR environment file** | `Scene.jsx:66` references `spree_bank_1k.hdr` | File not in public/ — 3D scene breaks |
-
-### 🟡 Major — Architecture & Design
-
-| # | Issue | Location | Impact |
-|---|-------|----------|--------|
-| 16 | **Chain name hardcoded to `polygon`** regardless of actual chain | `WalletConnect.jsx:71` | `chainId === 80002 ? 'polygon' : 'polygon'` — always polygon |
-| 17 | **16 unused chain caller functions** | `api/middleware/auth.js:21-83` | Dead code imported+defined but never called in auth flow |
-| 18 | **`getContract.js` functions return nothing** | `api/config/getContract.js` | All 16 functions call axios but don't return/store results |
-| 19 | **Duplicate state managers** | Jotai (3D scenes) + Redux (app state) | Unnecessary complexity, pick one |
-| 20 | **No error boundaries** | Entire React app | Any component crash kills the whole app |
-| 21 | **CustomCursor creates/removes anon functions** | `CustomCursor.jsx:26-29` | `removeEventListener` with arrow functions won't actually remove them (memory leak) |
-| 22 | **Dockerfile uses `yarn`** but project uses `npm` | `Dockerfile:5` | `yarn install` may produce different dependency tree |
-| 23 | **`package-lock.json` in `.gitignore`** | `.gitignore:14` | Non-reproducible builds across environments |
-| 24 | **Blog/property data is hardcoded** | `Home.jsx`, `Blog.jsx` | No CMS or API integration for content |
-
-### 🟡 Major — Missing Features
-
-| # | Feature | Status | Notes |
-|---|---------|--------|-------|
-| 25 | **Backend auth system** | ❌ Not implemented | Challenge-verify-JWT flow exists only in frontend slices |
-| 26 | **KYC backend** | ❌ Not implemented | Frontend Onfido UI exists but no `/kyc/*` backend routes |
-| 27 | **Identity/DID backend** | ❌ Not implemented | Frontend slices defined, no backend |
-| 28 | **Credentials backend** | ❌ Not implemented | Frontend slices defined, no backend |
-| 29 | **Bridge backend** | ❌ Not implemented | Frontend UI + state exists, no backend |
-| 30 | **Marketplace / NFT trading** | ❌ Not implemented | Referenced in UI copy but no code |
-| 31 | **Payment integration** | ❌ Not connected | `RealEstatePayment.sol` exists but not wired to frontend |
-| 32 | **DeFi vault integration** | ❌ Not connected | Lending/Yield vaults not wired to frontend |
-| 33 | **Admin panel** | ❌ Missing | No way to manage properties, users, or verify buildings |
-| 34 | **Search & filtering backend** | ⚠ Partial | Frontend sends query params, backend has basic regex filter |
-
-### 🟢 Minor — Code Quality
-
-| # | Issue | Location |
-|---|-------|----------|
-| 35 | No tests whatsoever | No `/test` dir, no test files, no test runner configured |
-| 36 | No ESLint config file | `lint` script exists but no `.eslintrc` |
-| 37 | No TypeScript | `tsconfig.app.json` exists but all code is `.jsx`/`.js` |
-| 38 | No API documentation | No Swagger/OpenAPI spec |
-| 39 | No CI/CD pipeline | No GitHub Actions, no deployment automation |
-| 40 | No rate limiting | Backend API has no request throttling |
-| 41 | No logging framework | Uses only `console.log` |
-| 42 | No database migrations/seeds | No way to bootstrap data |
-| 43 | `comos-sdk` dependency | `package.json:29` — likely typo for `cosmos-sdk`, unclear if used |
-| 44 | `leva` debug controls in production | `Experience.jsx` exposes `useControls` slider |
-| 45 | README claims Next.js | `README.md:44` says Next.js but project uses Vite |
-
----
-
-## What's Working ✅
-
-| Area | Status | Details |
-|------|--------|---------|
-| Vite dev server | ✅ | Hot reload, COEP/COOP headers configured |
-| React routing | ✅ | 11 public routes + 7 protected profile routes |
-| Redux state management | ✅ | 5 feature slices + RTK Query base |
-| TailwindCSS theming | ✅ | Custom primary/secondary palette with dark mode |
-| 3D property viewer | ⚠ | Works for `house1.glb` only (other models missing) |
-| MetaMask detection | ✅ | Provider detection + chain/account change listeners |
-| PWA setup | ✅ | Service worker + manifest + stale-while-revalidate |
-| Docker build | ⚠ | Builds but uses wrong package manager |
-| Property CRUD API | ✅ | Full REST endpoints with Cloudinary integration |
-| User API | ✅ | Basic CRUD |
-| MongoDB connection | ✅ | Conditional connect (skips if no URL) |
-| Smart contracts | ✅ | All 7 contracts compile with Hardhat |
-| Framer Motion animations | ✅ | Scroll animations + accordion FAQ |
-| Responsive layout | ✅ | Mobile hamburger menu + grid breakpoints |
-
----
-
-## Roadmap
-
-```mermaid
-gantt
-    title DreamProperty Development Roadmap
-    dateFormat YYYY-MM-DD
-    axisFormat %b %Y
-
-    section Critical Fixes
-    Fix JWT secret & env vars           :crit, 2026-06-04, 1d
-    Implement backend auth routes        :crit, 2026-06-04, 3d
-    Fix port mismatch & module systems   :crit, 2026-06-04, 1d
-    Add input validation                 :crit, 2026-06-05, 2d
-
-    section Backend
-    KYC & Identity API                   :2026-06-07, 5d
-    Bridge API                           :2026-06-12, 3d
-    Admin panel API                      :2026-06-15, 4d
-
-    section Smart Contracts
-    Wire payment contracts to frontend   :2026-06-10, 3d
-    Wire DeFi vaults to frontend         :2026-06-13, 4d
-    Testnet deployment & verification    :2026-06-17, 2d
-
-    section Quality
-    Add test suite                       :2026-06-07, 5d
-    CI/CD pipeline                       :2026-06-12, 2d
-    API documentation (Swagger)          :2026-06-14, 2d
-
-    section Polish
-    Add missing 3D models               :2026-06-19, 3d
-    NFT marketplace UI                   :2026-06-22, 5d
-    Production deployment               :2026-06-27, 3d
-```
-
----
-
-## Contributing
-
-We welcome contributions! Please fork the repository, create a new branch, and submit a pull request.
-Read our [CONTRIBUTING](CONTRIBUTING.md) guide before participating.
-
-## 📄 Code of Conduct
-
-Please read our [Code of Conduct](CODE_OF_CONDUCT.md) before participating. We're committed to a welcoming and harassment-free community.
-
-## 📄 License
-
-This project is licensed under the MIT License — see the [LICENSE](MIT_LICENSE.md) file for details.
-
----
-
-<p align="center">
-  <sub>Built with ❤️ by <a href="https://github.com/klasmalabs">KlasmaLabs</a></sub>
-</p>
-
-
-
-.....................................................................................................................................................
-# DreamProperty — Developer Workbook
-
-> Personal working document — tracks what needs to be built, what's broken, and the integration roadmap.
-
----
-
-## Codebase Feedback
-
-### What's Good
-- Frontend UI is well-structured — React + Redux Toolkit + React Router with proper separation (pages, components, features, services)
-- Dark theme system with CSS variables is clean and extensible
-- 3D property viewer with React Three Fiber is a strong differentiator
-- Redux slices are properly organized by feature (`auth`, `bridge`, `identity`, `credentials`, `kyc`)
-
-### What's Broken / Needs Immediate Attention
-
-#### 🔴 Critical
-
-| Issue | Location | Impact |
-|---|---|---|
-| `contractService.js` is **dead code** — never imported anywhere | `src/services/contractService.js` | No contract interaction works |
-| Contract addresses in `contractService.js` reference contracts (`SoulboundNFT`, `Bridge`, `GoldToken`) that **don't exist** in `/contracts/` | `src/services/contractService.js:26-31` | ABI mismatch, wrong contracts |
-| Hardhat config has **localhost only** — no testnet/mainnet | `hardhat.config.js` | Can't deploy anywhere real |
-| Backend missing routes for `bridge`, `identity`, `credentials`, `kyc` | `api/routes/` only has `property` + `user` | Frontend API calls will 404 |
-| Chain detection is broken — always returns `'polygon'` | `WalletConnect.jsx:71` → `chainId === 80002 ? 'polygon' : 'polygon'` | Cosmetic but shows unfinished logic |
-
-#### 🟡 Medium
-
-| Issue | Location | Impact |
-|---|---|---|
-| `comos-sdk` in dependencies — likely typo for `cosmos-sdk`, unused | `package.json:29` | Dead dependency |
-| PropertyDetail uses hardcoded mock contract address `0x1234...5678` | `src/pages/PropertyDetail.jsx:47` | Fake data shown to users |
-| BridgePage Solana balance is hardcoded `'100.0'` | `src/pages/profile/BridgePage.jsx:87` | Fake data |
-| No auth session persistence — wallet state lost on refresh | `authSlice.js` | Users re-connect every visit |
-| SoulboundNFT contract address has trailing space | `contractService.js:28` | Will fail on-chain calls |
-| `ethers` v5 is used — v6 is current, breaking API differences | `package.json:24` | Technical debt |
-
-#### 🟢 Minor
-
-| Issue | Location |
-|---|---|
-| No `.env.example` file — devs won't know what env vars are needed | Project root |
-| No error boundaries in React | `App.jsx` |
-| `removeAllListeners` on cleanup could remove other app's listeners | `WalletConnect.jsx:44-45` |
-
----
-
-## Integration Roadmap
-
-### Phase 1 — Auth (Privy Integration)
-
-**Goal:** Replace raw MetaMask flow with Privy for multi-wallet + email + social login support.
-
-#### Install
 ```bash
-npm install @privy-io/react-auth @privy-io/server-auth
-```
+# Chain
+EMEI_RPC_URL=https://mainnet.base.org
 
-#### Frontend Changes
+# Contracts
+EMEI_INVOICE_ADDRESS=0x...
+EMEI_MANDATE_ADDRESS=0x...
+EMEI_SETTLEMENT_ADDRESS=0x...
+EMEI_RECEIPT_ADDRESS=0x...
+EMEI_BAY8004_ADDRESS=0x...
+EMEI_ERC8004_ADDRESS=0x...
+EMEI_CONSERVATIVE_SATELLITE_ADDRESS=0x1493522095857A3e28e6573E8a1f6b612dd30B40
+EMEI_YIELD_SATELLITE_ADDRESS=0x...
 
-**1. `src/main.jsx`** — Wrap app with PrivyProvider
-```jsx
-import { PrivyProvider } from '@privy-io/react-auth';
+# Hot Wallets (gas sponsorship)
+EMEI_HOT_WALLET_KEY=0x...
+EMEI_HOT_WALLET_KEYS=0x...,0x...
 
-const privyConfig = {
-  loginMethods: ['wallet', 'email', 'google'],
-  appearance: {
-    theme: 'dark',
-    accentColor: '#your-accent-color',
-  },
-  embeddedWallets: {
-    createOnLogin: 'users-without-wallets',
-  },
-  supportedChains: [polygonAmoy], // or polygon mainnet
-};
+# Privy
+PRIVY_APP_ID=...
+PRIVY_APP_SECRET=...
+PRIVY_VERIFICATION_KEY=...
 
-ReactDOM.createRoot(document.getElementById('root')).render(
-  <PrivyProvider appId={import.meta.env.VITE_PRIVY_APP_ID} config={privyConfig}>
-    <App />
-  </PrivyProvider>
-);
-```
+# Infra
+DATABASE_URL=postgresql://...
+REDIS_URL=redis://...
 
-**2. Replace `src/components/WalletConnect.jsx`** — Use Privy hooks
-```jsx
-import { usePrivy, useWallets } from '@privy-io/react-auth';
-
-const WalletConnect = () => {
-  const { login, logout, authenticated, user } = usePrivy();
-  const { wallets } = useWallets();
-
-  // wallets[0].getEthersProvider() → use this for contract calls
-};
-```
-
-**3. Kill `src/features/auth/authApiSlice.js`** — No more challenge/sign flow. Privy handles this.
-
-**4. Update `src/features/auth/authSlice.js`** — Store Privy user object instead of raw wallet address.
-
-**5. Update `src/services/contractService.js`** — Replace provider init:
-```js
-// Before
-this.provider = new ethers.providers.Web3Provider(window.ethereum);
-
-// After (Privy)
-const wallet = wallets[0]; // from useWallets()
-this.provider = await wallet.getEthersProvider();
-```
-
-#### Backend Changes
-
-**6. `api/middleware/auth.js`** — Verify Privy JWT instead of custom token
-```js
-import { PrivyClient } from '@privy-io/server-auth';
-
-const privy = new PrivyClient(process.env.PRIVY_APP_ID, process.env.PRIVY_APP_SECRET);
-
-const verifyAuth = async (req, res, next) => {
-  const token = req.headers.authorization?.replace('Bearer ', '');
-  const { userId } = await privy.verifyAuthToken(token);
-  req.userId = userId;
-  next();
-};
-```
-
-#### Files To Delete After Privy
-- `src/features/auth/authApiSlice.js` (challenge/sign endpoints)
-- Backend `/auth/challenge` and `/auth/verify` routes (if they exist)
-
-#### Env Vars Needed
-```
-VITE_PRIVY_APP_ID=         # Frontend
-PRIVY_APP_ID=              # Backend
-PRIVY_APP_SECRET=          # Backend
+# Worker Intervals (seconds)
+EMEI_BATCH_INTERVAL=30
+EMEI_COLLECT_INTERVAL=10
+EMEI_OVERDUE_INTERVAL=60
+EMEI_SWEEP_INTERVAL=30
 ```
 
 ---
 
-### Phase 2 — Contract Deployment & Integration
+## Integration Status
 
-**Goal:** Deploy contracts to testnet and wire them into the frontend.
-
-#### 2a. Fix Hardhat Config
-
-Add Polygon Amoy (testnet) to `hardhat.config.js`:
-```js
-networks: {
-  localhost: { url: "http://127.0.0.1:8545" },
-  amoy: {
-    url: process.env.POLYGON_AMOY_RPC,
-    accounts: [process.env.DEPLOYER_PRIVATE_KEY],
-    chainId: 80002,
-  },
-},
-```
-
-#### 2b. Deploy Contracts
-```bash
-npx hardhat run scripts/deploy.js --network amoy
-```
-
-Save deployed addresses to a config file or `.env`.
-
-#### 2c. Generate ABIs
-
-After compiling, copy ABI JSON files from `artifacts/contracts/` into `src/abis/`:
-```
-src/abis/
-├── RealEstateNFT.json
-├── RealEstatePayment.json
-├── RWAAssetToken.json
-├── YieldVault.json
-└── LendingVault.json
-```
-
-#### 2d. Rewrite `contractService.js`
-
-Replace the hardcoded human-readable ABIs with actual compiled ABIs, and use deployed addresses from env/config:
-```js
-import RealEstateNFTAbi from '../abis/RealEstateNFT.json';
-import RealEstatePaymentAbi from '../abis/RealEstatePayment.json';
-
-const ADDRESSES = {
-  realEstateNFT: import.meta.env.VITE_NFT_CONTRACT,
-  realEstatePayment: import.meta.env.VITE_PAYMENT_CONTRACT,
-  rwaToken: import.meta.env.VITE_TOKEN_CONTRACT,
-  yieldVault: import.meta.env.VITE_YIELD_CONTRACT,
-  lendingVault: import.meta.env.VITE_LENDING_CONTRACT,
-};
-```
-
-#### 2e. Wire Into Pages
-
-| Page | Contract Call Needed |
-|---|---|
-| `PropertyDetail.jsx` | `RealEstatePayment.buyProperty()` — actual purchase |
-| `PropertyDetail.jsx` | `RealEstateNFT.getBuildingBadge()` — show real verification status |
-| New: `StakingPage.jsx` | `YieldVault.stake()`, `YieldVault.claim()` |
-| New: `LendingPage.jsx` | `LendingVault.depositCollateral()`, `LendingVault.borrow()`, `LendingVault.repay()` |
-| `DashboardPage.jsx` | `RWAAssetToken.balanceOf()` — show real token balance |
+| Component | Status |
+|-----------|--------|
+| AceVaults (all contracts) | ✅ Complete, deployed on Base |
+| fortress-engine (cycle + operator) | ✅ Complete |
+| EMEI Contracts (Invoice, Mandate, Receipt, Bay8004) | ✅ Complete |
+| EMEISettlement → Satellite Wiring | ❌ Pending |
+| Sweep Limit Engine | ❌ Pending |
+| Shared Buffer Pool | ❌ Pending |
+| Auth (X-Private-Key → Privy) | ❌ Pending |
+| Chain Migration (Mantle → Base) | ❌ Pending |
+| Sweeper Background Worker | ❌ Pending |
 
 ---
 
-### Phase 3 — Backend Completion
+## Integration Changes Required
 
-**Goal:** Build missing API routes that the frontend already expects.
+### 1. EMEISettlement Rewrite (Critical Path)
+- Remove mUSD, swapRouter, slippageBps, VaultType, all mock internals
+- Add `conservativeSatellite`, `yieldSatellite`, `sweepLimit`, `bufferPool`, `bufferBps`
+- Rewrite `settle()`: split USDC between Conservative + Yield + Buffer per sweep limit
+- Rewrite `withdraw()`: redeem from Conservative first, then Yield, loan from buffer
+- Add `setSweepLimit()`, `setBufferBps()`, `topUpFromYield()`
 
-#### Missing Routes (Frontend Has Slices, Backend Has Nothing)
+### 2. Interface Updates
+- Create `ISatellite.sol` (ERC-4626 subset)
+- Rewrite `IEMEISettlement.sol` (remove VaultType, add sweep/buffer functions)
 
-| Feature | Frontend Slice | Backend Route Needed |
-|---|---|---|
-| Identity / DID | `features/identity/identityApiSlice.js` | `POST /api/identity/create` |
-| Bridge | `features/bridge/bridgeApiSlice.js` | `POST /api/bridge/verify`, `POST /api/bridge/transfer`, `GET /api/bridge/status/:id` |
-| Credentials | `features/credentials/` | `POST /api/credentials/issue`, `GET /api/credentials/:id` |
-| KYC | `features/kyc/` | `POST /api/kyc/submit`, `GET /api/kyc/status` |
+### 3. Sweeper Worker (New)
+- Background service monitoring agent Conservative balances
+- Triggers `topUpFromYield()` when spendable drops below sweep limit
+- Triggers excess sweep when spendable exceeds limit after payment receipt
 
-#### Backend Files To Create
-```
-api/
-├── controllers/
-│   ├── identity.controller.js
-│   ├── bridge.controller.js
-│   ├── credentials.controller.js
-│   └── kyc.controller.js
-├── routes/
-│   ├── identity.routes.js
-│   ├── bridge.routes.js
-│   ├── credentials.routes.js
-│   └── kyc.routes.js
-└── middleware/
-    └── auth.js  ← update for Privy JWT
-```
+### 4. Deployment to Base
+- Redeploy all EMEI contracts on Base (8453)
+- Point USDC to `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`
+- Point satellites to deployed AceVaults addresses
 
----
+### 5. Facilitator Rust Updates
+- Add Satellite ABI bindings
+- Update `withdraw.rs` → Satellite.redeem() via Privy-signed tx
+- Update `query.rs` → read from Satellite.convertToAssets(balanceOf)
+- Update `chain.rs` → Base chain config (ETH gas, chain ID 8453)
 
-### Phase 4 — Polish & Production Readiness
+### 6. Auth Migration
+- Replace `UserSigner` (X-Private-Key header) with `PrivyAuth` (JWT verification)
+- Create `privy.rs` module for server wallet creation and tx signing
+- Add Privy env vars to config
 
-| Task | Priority |
-|---|---|
-| Add `.env.example` with all required vars | High |
-| Add React error boundaries | High |
-| Add auth session persistence (Privy handles this if integrated) | High |
-| Remove `comos-sdk` from `package.json` | Low |
-| Consider upgrading `ethers` v5 → v6 | Medium |
-| Add proper loading/error states on all pages | Medium |
-| Replace hardcoded mock data in `PropertyDetail.jsx` | High |
-| Add transaction receipt tracking / block explorer links | Medium |
-| Write tests for contract interactions | Medium |
+### 7. Tests
+- Deploy mock Satellite in Foundry test setup
+- Test: settle → verify split between Conservative + Yield + Buffer
+- Test: payment exceeding spendable → verify buffer loan
+- Test: withdrawal → verify USDC from correct Satellite
+- Test: sweep limit change → verify redistribution
 
 ---
 
-## Task Checklist
+## Fee Model
 
-### Sprint 1 — Foundation
-- [ ] Set up Privy account, get App ID + Secret
-- [ ] Install `@privy-io/react-auth` + `@privy-io/server-auth`
-- [ ] Wrap app with `PrivyProvider` in `main.jsx`
-- [ ] Replace `WalletConnect.jsx` with Privy login
-- [ ] Update `authSlice.js` to store Privy user
-- [ ] Update backend auth middleware for Privy JWT
-- [ ] Delete old challenge/sign auth flow
-- [ ] Create `.env.example`
+| Fee | Rate | Trigger | Recipient |
+|-----|------|---------|-----------|
+| Management | 0.75% annual | Every deposit/withdraw | Treasury |
+| Performance | 15% of gains | On withdrawal (above HWM) | Treasury |
+| PSM Buy | 50 bps | On frtUSD purchase | Treasury |
+| PSM Sell | 50 bps | On frtUSD redemption | Treasury |
 
-### Sprint 2 — Contracts
-- [ ] Add Polygon Amoy network to `hardhat.config.js`
-- [ ] Fix trailing space in contract address (`contractService.js:28`)
-- [ ] Deploy all contracts to Amoy testnet
-- [ ] Copy compiled ABIs to `src/abis/`
-- [ ] Rewrite `contractService.js` with real ABIs + env-based addresses
-- [ ] Implement `buyProperty()` flow on PropertyDetail page
-- [ ] Show real token balances on DashboardPage
+---
 
-### Sprint 3 — Backend + Features
-- [ ] Build identity/DID API routes
-- [ ] Build bridge API routes
-- [ ] Build credentials API routes
-- [ ] Build KYC API routes
-- [ ] Create Staking page (YieldVault UI)
-- [ ] Create Lending page (LendingVault UI)
+## Authorization Matrix
 
-### Sprint 4 — Polish
-- [ ] Remove dead code (`comos-sdk`, unused imports)
-- [ ] Add error boundaries
-- [ ] Add transaction confirmation UX (toasts, block explorer links)
-- [ ] Test full flow: login → browse → purchase → dashboard
-- [ ] Responsive testing on mobile
+| Action | Owner | Operator | Facilitator | Agent | User |
+|--------|-------|----------|-------------|-------|------|
+| deposit (Satellite) | - | - | - | - | ✓ |
+| withdraw (Satellite) | - | - | - | - | ✓ |
+| rebalance (Satellite) | - | ✓ | - | - | - |
+| settle (EMEISettlement) | - | - | - | - | via Invoice |
+| setSweepLimit | ✓ | - | - | - | ✓ (own agents) |
+| topUpFromYield | - | - | ✓ | - | - |
+| createMandate | - | - | - | - | ✓ |
+| revokeMandate | - | - | - | - | ✓ |
+| createInvoice | - | - | - | ✓ | ✓ |
+| collect (auto) | - | - | ✓ | - | - |
+
+---
+
+## Security Model
+
+1. **Privy Custody**: Users own embedded wallets. Agents use server wallets. Fortress/EMEI only holds scoped, revocable session signers — never master keys.
+2. **Mandate Guardrails**: On-chain spending bounds (cap, counterparty allowlist, category allowlist, time window) enforced before every auto-collection.
+3. **Sentinel Veto**: Risk flags (RED/BLACK) block protocol rebalancing. 15-min review window between attestation and execution.
+4. **Gas Sponsorship**: Hot wallet pool with Redis-managed nonces. Agents never hold native gas tokens.
+5. **Receipt Anchoring**: Merkle roots of payment batches posted on-chain for trustless auditability.
+
+---
+
+**End of Document**
