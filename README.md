@@ -629,3 +629,293 @@ This project is licensed under the MIT License — see the [LICENSE](MIT_LICENSE
 <p align="center">
   <sub>Built with ❤️ by <a href="https://github.com/klasmalabs">KlasmaLabs</a></sub>
 </p>
+
+
+
+.....................................................................................................................................................
+# DreamProperty — Developer Workbook
+
+> Personal working document — tracks what needs to be built, what's broken, and the integration roadmap.
+
+---
+
+## Codebase Feedback
+
+### What's Good
+- Frontend UI is well-structured — React + Redux Toolkit + React Router with proper separation (pages, components, features, services)
+- Dark theme system with CSS variables is clean and extensible
+- 3D property viewer with React Three Fiber is a strong differentiator
+- Redux slices are properly organized by feature (`auth`, `bridge`, `identity`, `credentials`, `kyc`)
+
+### What's Broken / Needs Immediate Attention
+
+#### 🔴 Critical
+
+| Issue | Location | Impact |
+|---|---|---|
+| `contractService.js` is **dead code** — never imported anywhere | `src/services/contractService.js` | No contract interaction works |
+| Contract addresses in `contractService.js` reference contracts (`SoulboundNFT`, `Bridge`, `GoldToken`) that **don't exist** in `/contracts/` | `src/services/contractService.js:26-31` | ABI mismatch, wrong contracts |
+| Hardhat config has **localhost only** — no testnet/mainnet | `hardhat.config.js` | Can't deploy anywhere real |
+| Backend missing routes for `bridge`, `identity`, `credentials`, `kyc` | `api/routes/` only has `property` + `user` | Frontend API calls will 404 |
+| Chain detection is broken — always returns `'polygon'` | `WalletConnect.jsx:71` → `chainId === 80002 ? 'polygon' : 'polygon'` | Cosmetic but shows unfinished logic |
+
+#### 🟡 Medium
+
+| Issue | Location | Impact |
+|---|---|---|
+| `comos-sdk` in dependencies — likely typo for `cosmos-sdk`, unused | `package.json:29` | Dead dependency |
+| PropertyDetail uses hardcoded mock contract address `0x1234...5678` | `src/pages/PropertyDetail.jsx:47` | Fake data shown to users |
+| BridgePage Solana balance is hardcoded `'100.0'` | `src/pages/profile/BridgePage.jsx:87` | Fake data |
+| No auth session persistence — wallet state lost on refresh | `authSlice.js` | Users re-connect every visit |
+| SoulboundNFT contract address has trailing space | `contractService.js:28` | Will fail on-chain calls |
+| `ethers` v5 is used — v6 is current, breaking API differences | `package.json:24` | Technical debt |
+
+#### 🟢 Minor
+
+| Issue | Location |
+|---|---|
+| No `.env.example` file — devs won't know what env vars are needed | Project root |
+| No error boundaries in React | `App.jsx` |
+| `removeAllListeners` on cleanup could remove other app's listeners | `WalletConnect.jsx:44-45` |
+
+---
+
+## Integration Roadmap
+
+### Phase 1 — Auth (Privy Integration)
+
+**Goal:** Replace raw MetaMask flow with Privy for multi-wallet + email + social login support.
+
+#### Install
+```bash
+npm install @privy-io/react-auth @privy-io/server-auth
+```
+
+#### Frontend Changes
+
+**1. `src/main.jsx`** — Wrap app with PrivyProvider
+```jsx
+import { PrivyProvider } from '@privy-io/react-auth';
+
+const privyConfig = {
+  loginMethods: ['wallet', 'email', 'google'],
+  appearance: {
+    theme: 'dark',
+    accentColor: '#your-accent-color',
+  },
+  embeddedWallets: {
+    createOnLogin: 'users-without-wallets',
+  },
+  supportedChains: [polygonAmoy], // or polygon mainnet
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <PrivyProvider appId={import.meta.env.VITE_PRIVY_APP_ID} config={privyConfig}>
+    <App />
+  </PrivyProvider>
+);
+```
+
+**2. Replace `src/components/WalletConnect.jsx`** — Use Privy hooks
+```jsx
+import { usePrivy, useWallets } from '@privy-io/react-auth';
+
+const WalletConnect = () => {
+  const { login, logout, authenticated, user } = usePrivy();
+  const { wallets } = useWallets();
+
+  // wallets[0].getEthersProvider() → use this for contract calls
+};
+```
+
+**3. Kill `src/features/auth/authApiSlice.js`** — No more challenge/sign flow. Privy handles this.
+
+**4. Update `src/features/auth/authSlice.js`** — Store Privy user object instead of raw wallet address.
+
+**5. Update `src/services/contractService.js`** — Replace provider init:
+```js
+// Before
+this.provider = new ethers.providers.Web3Provider(window.ethereum);
+
+// After (Privy)
+const wallet = wallets[0]; // from useWallets()
+this.provider = await wallet.getEthersProvider();
+```
+
+#### Backend Changes
+
+**6. `api/middleware/auth.js`** — Verify Privy JWT instead of custom token
+```js
+import { PrivyClient } from '@privy-io/server-auth';
+
+const privy = new PrivyClient(process.env.PRIVY_APP_ID, process.env.PRIVY_APP_SECRET);
+
+const verifyAuth = async (req, res, next) => {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  const { userId } = await privy.verifyAuthToken(token);
+  req.userId = userId;
+  next();
+};
+```
+
+#### Files To Delete After Privy
+- `src/features/auth/authApiSlice.js` (challenge/sign endpoints)
+- Backend `/auth/challenge` and `/auth/verify` routes (if they exist)
+
+#### Env Vars Needed
+```
+VITE_PRIVY_APP_ID=         # Frontend
+PRIVY_APP_ID=              # Backend
+PRIVY_APP_SECRET=          # Backend
+```
+
+---
+
+### Phase 2 — Contract Deployment & Integration
+
+**Goal:** Deploy contracts to testnet and wire them into the frontend.
+
+#### 2a. Fix Hardhat Config
+
+Add Polygon Amoy (testnet) to `hardhat.config.js`:
+```js
+networks: {
+  localhost: { url: "http://127.0.0.1:8545" },
+  amoy: {
+    url: process.env.POLYGON_AMOY_RPC,
+    accounts: [process.env.DEPLOYER_PRIVATE_KEY],
+    chainId: 80002,
+  },
+},
+```
+
+#### 2b. Deploy Contracts
+```bash
+npx hardhat run scripts/deploy.js --network amoy
+```
+
+Save deployed addresses to a config file or `.env`.
+
+#### 2c. Generate ABIs
+
+After compiling, copy ABI JSON files from `artifacts/contracts/` into `src/abis/`:
+```
+src/abis/
+├── RealEstateNFT.json
+├── RealEstatePayment.json
+├── RWAAssetToken.json
+├── YieldVault.json
+└── LendingVault.json
+```
+
+#### 2d. Rewrite `contractService.js`
+
+Replace the hardcoded human-readable ABIs with actual compiled ABIs, and use deployed addresses from env/config:
+```js
+import RealEstateNFTAbi from '../abis/RealEstateNFT.json';
+import RealEstatePaymentAbi from '../abis/RealEstatePayment.json';
+
+const ADDRESSES = {
+  realEstateNFT: import.meta.env.VITE_NFT_CONTRACT,
+  realEstatePayment: import.meta.env.VITE_PAYMENT_CONTRACT,
+  rwaToken: import.meta.env.VITE_TOKEN_CONTRACT,
+  yieldVault: import.meta.env.VITE_YIELD_CONTRACT,
+  lendingVault: import.meta.env.VITE_LENDING_CONTRACT,
+};
+```
+
+#### 2e. Wire Into Pages
+
+| Page | Contract Call Needed |
+|---|---|
+| `PropertyDetail.jsx` | `RealEstatePayment.buyProperty()` — actual purchase |
+| `PropertyDetail.jsx` | `RealEstateNFT.getBuildingBadge()` — show real verification status |
+| New: `StakingPage.jsx` | `YieldVault.stake()`, `YieldVault.claim()` |
+| New: `LendingPage.jsx` | `LendingVault.depositCollateral()`, `LendingVault.borrow()`, `LendingVault.repay()` |
+| `DashboardPage.jsx` | `RWAAssetToken.balanceOf()` — show real token balance |
+
+---
+
+### Phase 3 — Backend Completion
+
+**Goal:** Build missing API routes that the frontend already expects.
+
+#### Missing Routes (Frontend Has Slices, Backend Has Nothing)
+
+| Feature | Frontend Slice | Backend Route Needed |
+|---|---|---|
+| Identity / DID | `features/identity/identityApiSlice.js` | `POST /api/identity/create` |
+| Bridge | `features/bridge/bridgeApiSlice.js` | `POST /api/bridge/verify`, `POST /api/bridge/transfer`, `GET /api/bridge/status/:id` |
+| Credentials | `features/credentials/` | `POST /api/credentials/issue`, `GET /api/credentials/:id` |
+| KYC | `features/kyc/` | `POST /api/kyc/submit`, `GET /api/kyc/status` |
+
+#### Backend Files To Create
+```
+api/
+├── controllers/
+│   ├── identity.controller.js
+│   ├── bridge.controller.js
+│   ├── credentials.controller.js
+│   └── kyc.controller.js
+├── routes/
+│   ├── identity.routes.js
+│   ├── bridge.routes.js
+│   ├── credentials.routes.js
+│   └── kyc.routes.js
+└── middleware/
+    └── auth.js  ← update for Privy JWT
+```
+
+---
+
+### Phase 4 — Polish & Production Readiness
+
+| Task | Priority |
+|---|---|
+| Add `.env.example` with all required vars | High |
+| Add React error boundaries | High |
+| Add auth session persistence (Privy handles this if integrated) | High |
+| Remove `comos-sdk` from `package.json` | Low |
+| Consider upgrading `ethers` v5 → v6 | Medium |
+| Add proper loading/error states on all pages | Medium |
+| Replace hardcoded mock data in `PropertyDetail.jsx` | High |
+| Add transaction receipt tracking / block explorer links | Medium |
+| Write tests for contract interactions | Medium |
+
+---
+
+## Task Checklist
+
+### Sprint 1 — Foundation
+- [ ] Set up Privy account, get App ID + Secret
+- [ ] Install `@privy-io/react-auth` + `@privy-io/server-auth`
+- [ ] Wrap app with `PrivyProvider` in `main.jsx`
+- [ ] Replace `WalletConnect.jsx` with Privy login
+- [ ] Update `authSlice.js` to store Privy user
+- [ ] Update backend auth middleware for Privy JWT
+- [ ] Delete old challenge/sign auth flow
+- [ ] Create `.env.example`
+
+### Sprint 2 — Contracts
+- [ ] Add Polygon Amoy network to `hardhat.config.js`
+- [ ] Fix trailing space in contract address (`contractService.js:28`)
+- [ ] Deploy all contracts to Amoy testnet
+- [ ] Copy compiled ABIs to `src/abis/`
+- [ ] Rewrite `contractService.js` with real ABIs + env-based addresses
+- [ ] Implement `buyProperty()` flow on PropertyDetail page
+- [ ] Show real token balances on DashboardPage
+
+### Sprint 3 — Backend + Features
+- [ ] Build identity/DID API routes
+- [ ] Build bridge API routes
+- [ ] Build credentials API routes
+- [ ] Build KYC API routes
+- [ ] Create Staking page (YieldVault UI)
+- [ ] Create Lending page (LendingVault UI)
+
+### Sprint 4 — Polish
+- [ ] Remove dead code (`comos-sdk`, unused imports)
+- [ ] Add error boundaries
+- [ ] Add transaction confirmation UX (toasts, block explorer links)
+- [ ] Test full flow: login → browse → purchase → dashboard
+- [ ] Responsive testing on mobile
