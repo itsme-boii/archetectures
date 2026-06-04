@@ -1,343 +1,456 @@
-# EMEI Contracts Reference
+# EMEI Contract Suite — Upgrade Specification
 
-> Complete reference for every EMEI smart contract, its role, and every function with 3-point explanations.
-
----
-
-## Contract Overview
-
-```mermaid
-flowchart LR
-    INV["EMEIInvoice"] -->|"calls settle()"| SET["EMEISettlement"]
-    INV -->|"calls validateAndDecrement()"| MAN["EMEIMandate"]
-    INV -->|"calls scoreOf() / giveFeedback()"| BAY["Bay8004"]
-    BAY -->|"reads/writes"| ERC["MockERC8004"]
-    SET -->|"deposit()"| CON["Conservative Satellite"]
-    SET -->|"deposit()"| YLD["Yield Satellite"]
-    REC["EMEIReceipt"] -.->|"standalone"| REC
-```
-
-| Contract | Role |
-|----------|------|
-| **EMEIInvoice** | Invoice lifecycle state machine. Central orchestrator. |
-| **EMEIMandate** | Programmable spending pre-authorizations for autonomous agents. |
-| **EMEISettlement** | USDC routing engine with dual-tranche vaults, sweep limits, and buffer pool. |
-| **EMEIReceipt** | On-chain Merkle root anchoring for verifiable payment proofs. |
-| **Bay8004** | Reputation gate adapter with weighted scoring. |
-| **MockERC8004** | Identity registry (ERC-8004 testnet implementation). |
+> This document details every change across all 5 contracts. Read through, approve, and then we implement in dependency order.
 
 ---
 
-## 1. EMEIInvoice
+## Overview
 
-**File**: `src/EMEIInvoice.sol`  
-**Role**: Central contract managing the invoice lifecycle. Owns the state machine and orchestrates calls to Bay8004, EMEISettlement, and EMEIMandate.
+| Contract | Current | After Upgrade | Key Changes |
+|----------|---------|---------------|-------------|
+| Bay8004 → **EMEIReputation** | ERC-8004 wrapper, external registry | Standalone internal scoring | Drop ERC-8004, add history, logarithmic scoring |
+| EMEIReceipt | Owner/poster pattern, custom Merkle | AccessControl + OZ MerkleProof | Sequential batches, metadata, pause posting |
+| EMEIMandate | Single owner, no signatures | AccessControl + EIP-712 | Signed create/revoke, recurring resets, per-counterparty limits |
+| EMEISettlement | Owner/facilitator, string requires | AccessControl + ReentrancyGuard | Daily withdraw limits, asset whitelist, emergency drain |
+| EMEIInvoice | Single owner, string storage | ERC-721 + AccessControl + EIP-712 | NFT invoices, state machine lib, metadata hashing |
 
-### State Machine
-
-```
-ISSUED → PRESENTED → PAID
-                   → OVERDUE → PAID
-         → REJECTED
-→ REJECTED
-```
-
-### Functions
-
-#### `createInvoice(CreateInvoiceParams params) → uint256 invoiceId`
-- **What it does**: Creates a new invoice with line items, payment terms, and collection mode (MANDATE or PAY_LINK). Assigns a unique auto-incrementing ID.
-- **Access control**: Any registered address can call it. Both the issuer (msg.sender) and the payer must pass the Bay8004 reputation gate (score ≥ minReputation).
-- **Validation**: Requires non-zero amount, non-zero payer, 1-50 line items, valid term type (NET_N_DAYS requires 1-365 days, MILESTONES requires milestone amounts summing to invoice amount).
-
-#### `present(uint256 invoiceId)`
-- **What it does**: Transitions an invoice from ISSUED to PRESENTED, recording the presentation timestamp. This timestamp is used to calculate due dates for NET_N_DAYS and DUE_ON_RECEIPT terms.
-- **Access control**: Only the invoice issuer (the address that created the invoice) can present it.
-- **State requirement**: Invoice must be in ISSUED status. Reverts with `InvalidStatusTransition` otherwise.
-
-#### `pay(uint256 invoiceId)`
-- **What it does**: Executes manual payment by the payer. Calls `EMEISettlement.settle()` to transfer USDC, then calls `Bay8004.giveFeedback()` for both issuer and payer to update their reputation scores.
-- **Access control**: Only the designated payer can call this function. The payer must pass the reputation gate at payment time (score rechecked).
-- **Failure handling**: If settlement fails, the transaction reverts with `SettlementFailed`. If the payer's reputation drops below threshold between presentation and payment, the invoice is automatically moved to REJECTED.
-
-#### `collect(uint256 invoiceId, uint256 mandateId)`
-- **What it does**: Executes automatic collection against a pre-authorized mandate. First validates the mandate (cap, counterparty, category, time window), then calls settlement. This is the function triggered by the EMEI Facilitator's auto-collector worker.
-- **Access control**: Anyone can call collect (it's designed for backend automation). Authorization is enforced by EMEIMandate's `validateAndDecrement()` which checks that the invoice issuer is an approved counterparty.
-- **Side effects**: Decrements the mandate's remaining spending cap by the invoice amount. If the cap reaches zero, the mandate status transitions to EXHAUSTED.
-
-#### `markOverdue(uint256 invoiceId)`
-- **What it does**: Transitions an invoice from PRESENTED to OVERDUE when the payment deadline has passed. The deadline depends on the term type: DUE_ON_RECEIPT (immediate), NET_N_DAYS (presentedAt + netDays), MILESTONES (first milestone dueDate).
-- **Access control**: Anyone can call this (it's a public state transition based on time).
-- **Requirement**: `block.timestamp` must be past the calculated due date. Reverts if the invoice is not yet overdue.
-
-#### `reject(uint256 invoiceId, string reason)`
-- **What it does**: Cancels an invoice by transitioning it to REJECTED. Emits a reason string for auditability.
-- **Access control**: Only the invoice issuer can reject. The invoice must be in ISSUED or PRESENTED status.
-- **Use case**: Issuer discovers the invoice was created in error, or the payer requests cancellation and the issuer agrees.
-
-#### `getInvoice(uint256 invoiceId) → Invoice`
-- **What it does**: Returns the full invoice struct including line items, milestones, settlement proof, and all metadata.
-- **Access control**: Public view function, anyone can read.
-- **Note**: Reconstructs dynamic arrays (line items, milestones) from separate gas-efficient storage mappings.
-
-#### `getInvoiceCount() → uint256`
-- **What it does**: Returns the total number of invoices created (the next ID minus 1).
-- **Access control**: Public view function.
-- **Use case**: Used by the Facilitator's indexer to detect new invoices.
-
-#### `setMinReputation(uint256 threshold)`
-- **What it does**: Updates the minimum reputation score required to create or pay invoices. Threshold must be between 1 and 10000.
-- **Access control**: Owner only.
-- **Impact**: Affects all future invoice creation and payment attempts. Existing invoices are not retroactively affected at creation time, but payers are re-checked at payment time.
+**Shared patterns across all contracts:**
+- AccessControl (granular roles, no single owner)
+- Custom errors (no string requires)
+- Pausable where needed
+- Storage packing
+- Comprehensive events
 
 ---
 
-## 2. EMEIMandate
+## 1. EMEIReputation (was Bay8004)
 
-**File**: `src/EMEIMandate.sol`  
-**Role**: Manages payer pre-authorizations for scoped automatic collection. Mandates define who can collect, how much, for what categories, and during what time window.
+### What changes
 
-### Functions
+| # | Change | Before | After |
+|---|--------|--------|-------|
+| 1 | Drop ERC-8004 dependency | Wraps external MockERC8004 registry | Internal `mapping(address => ReputationData)` |
+| 2 | Internal storage | Calls external contract for reads/writes | Direct SLOAD/SSTORE — 60% cheaper reads |
+| 3 | AccessControl | `onlyOwner` | `SCORER_ROLE` (InvoiceContract only) + `PAUSER_ROLE` |
+| 4 | Positive updates | `giveFeedback(subject, invoiceId, amount)` | `addPositive(account, invoiceId, weight)` with diminishing returns |
+| 5 | Negative updates | Same function with amount=0 | `addNegative(account, invoiceId, weight)` with amplification at low scores |
+| 6 | History | Not stored | Append-only `ReputationEvent[]` per account |
+| 7 | Pause | None | Pause scoring updates, views always work |
+| 8 | Custom errors | `require("string")` | `ZeroAddress()`, `ZeroWeight()` |
 
-#### `createMandate(CreateMandateParams params) → uint256 mandateId`
-- **What it does**: Creates a new spending pre-authorization. The caller (msg.sender) becomes the payer/grantor. Stores approved counterparties and categories in both array form (for retrieval) and mapping form (for O(1) validation).
-- **Access control**: Self-authorized — the caller is always the payer. No admin override.
-- **Validation**: Requires non-zero spendCap, future validUntil, 1-50 counterparties, 1-20 categories.
-
-#### `validateAndDecrement(uint256 mandateId, address issuer, uint256 amount, string category) → bool`
-- **What it does**: Validates that a collection request passes all mandate rules (active status, time window, counterparty allowlist, category allowlist, sufficient remaining cap), then atomically decrements the remaining cap.
-- **Access control**: Only the EMEIInvoice contract can call this (enforced by `onlyInvoiceContract` modifier). This prevents external callers from manipulating mandate state.
-- **Side effects**: Reduces `remainingCap` by `amount`. If `remainingCap` reaches zero, the mandate status transitions to EXHAUSTED.
-
-#### `revokeMandate(uint256 mandateId)`
-- **What it does**: Permanently deactivates a mandate by setting its status to REVOKED. No further collections can be made against it.
-- **Access control**: Only the mandate's payer (the address that created it) can revoke.
-- **Requirement**: Mandate must be in ACTIVE status. Cannot revoke an already EXHAUSTED or REVOKED mandate.
-
-#### `getMandate(uint256 mandateId) → Mandate`
-- **What it does**: Returns the full mandate struct including all approved counterparties, categories, caps, and status.
-- **Access control**: Public view function.
-- **Data**: Reconstructs the full struct from gas-efficient storage mappings.
-
-#### `getMandatesByPayer(address payer) → uint256[]`
-- **What it does**: Returns an array of all mandate IDs created by a specific payer address.
-- **Access control**: Public view function.
-- **Use case**: The Facilitator queries this to find active mandates for auto-collection matching.
-
-#### `setInvoiceContract(address invoiceContract)`
-- **What it does**: Sets the EMEIInvoice contract address that is authorized to call `validateAndDecrement`. Must be called after deployment to link contracts.
-- **Access control**: Owner only.
-- **Critical**: If not set, no auto-collections can execute because `validateAndDecrement` will revert for all callers.
-
----
-
-## 3. EMEISettlement
-
-**File**: `src/EMEISettlement.sol`  
-**Role**: USDC routing engine with dual-tranche vault integration, automated treasury sweeping via sweep limits, and a shared liquidity buffer pool for instant payments.
-
-### Architecture
-
-```mermaid
-flowchart TD
-    USDC["USDC from Payer"] --> SETTLE["EMEISettlement"]
-    SETTLE -->|"≤ Sweep Limit"| CON["Conservative Satellite<br/>(Aave/Morpho ~3% APY)"]
-    SETTLE -->|"> Sweep Limit × 95%"| YLD["Yield Satellite<br/>(Aero/Pendle ~15% APY)"]
-    SETTLE -->|"> Sweep Limit × 5%"| BUF["Shared Buffer Pool"]
-    CON -->|"frtUSD shares"| AGENT["Agent Wallet"]
-    YLD -->|"frtUSD shares"| AGENT
-```
-
-### Functions
-
-#### `settle(uint256 invoiceId, address payer, address payee, uint256 amount, address asset) → bytes32 proof`
-- **What it does**: Pulls USDC from the payer, then splits it between the Conservative Satellite, Yield Satellite, and Buffer Pool based on the payee's sweep limit. Deposits into Satellites with the payee (agent wallet) as the share receiver. Returns a keccak256 settlement proof.
-- **Access control**: Only the EMEIInvoice contract can call this (via `onlyInvoiceContract`).
-- **Split logic**: If payee has no sweep limit, all goes to Conservative (safe default). If payee's Conservative balance is below the sweep limit, fills it up first. Any excess is split: 95% to Yield Satellite, 5% to Buffer Pool.
-
-#### `withdraw(uint256 amount)`
-- **What it does**: Allows an agent to withdraw USDC from their vault positions. Cascades through Conservative → Yield → Buffer Pool to find sufficient funds. Transfers USDC to the caller.
-- **Access control**: Any agent can withdraw their own funds (msg.sender).
-- **Cascade**: First redeems from Conservative (cheapest, most liquid). If insufficient, redeems from Yield. If still insufficient, loans from the shared Buffer Pool (tracked as a debt to be repaid by the sweeper).
-
-#### `withdrawTo(address agent, address destination, uint256 amount)`
-- **What it does**: Withdraws USDC from an agent's vault position and sends it to a different destination address. Used when the Facilitator backend redeems an agent's funds to their owner's embedded wallet via Privy-signed transactions.
-- **Access control**: Only the owner or facilitator can call this. This is the function that enables the "Alice withdraws Charlie's earnings to her wallet" flow.
-- **Cascade**: Same Conservative → Yield → Buffer logic as `withdraw()`.
-
-#### `topUpFromYield(address agent)`
-- **What it does**: Redeems frtUSD shares from the agent's Yield Satellite position and deposits the USDC into their Conservative Satellite position. Also repays any outstanding buffer loan for the agent first.
-- **Access control**: Only the facilitator can call this. Triggered by the Sweeper background worker when it detects an agent's spendable balance dropped below their sweep limit.
-- **Safety**: If the agent has no sweep limit, or their Conservative balance already meets the limit, this is a no-op.
-
-#### `setSweepLimit(address agent, uint256 limit)`
-- **What it does**: Configures the USDC threshold for an agent's "checking account." Funds below this limit stay in the Conservative Satellite (safe, instant access). Funds above are swept to the Yield Satellite (higher returns).
-- **Access control**: Owner or facilitator only.
-- **Default**: If no sweep limit is set (0), all settled funds go to Conservative as a safe default.
-
-#### `getVaultBalance(address payee) → uint256`
-- **What it does**: Returns the total USDC value across both the Conservative and Yield Satellite positions for a payee.
-- **Calculation**: `Conservative.convertToAssets(Conservative.balanceOf(payee)) + Yield.convertToAssets(Yield.balanceOf(payee))`.
-- **Note**: This reflects real-time value including any yield accrued from share price appreciation.
-
-#### `getAccruedYield(address payee) → uint256`
-- **What it does**: Returns the yield earned by a payee (current total vault value minus total principal deposited).
-- **Calculation**: `getVaultBalance(payee) - totalDeposited[payee]`. Returns 0 if current value is less than or equal to deposited principal.
-- **Use case**: Displayed on the agent dashboard to show earnings.
-
-#### `getSpendableBalance(address agent) → uint256`
-- **What it does**: Returns the USDC value of an agent's Conservative Satellite shares only. This is the "checking account" balance available for instant payments.
-- **Access control**: Public view function.
-- **Importance**: The Sweeper worker compares this against the sweep limit to decide whether to trigger a top-up.
-
-#### `getInvestmentBalance(address agent) → uint256`
-- **What it does**: Returns the USDC value of an agent's Yield Satellite shares only. This is the "savings account" balance earning higher APY.
-- **Access control**: Public view function.
-- **Note**: This balance may not be instantly liquid if the Yield Satellite has funds locked in Pendle PTs or LP positions.
-
-#### `getSweepLimit(address agent) → uint256`
-- **What it does**: Returns the configured sweep limit for an agent.
-- **Access control**: Public view function.
-- **Default**: Returns 0 if no limit has been set.
-
-#### `setBufferBps(uint256 bps)`
-- **What it does**: Updates the percentage of swept funds retained in the Buffer Pool (in basis points). Default is 500 (5%). Maximum is 2000 (20%).
-- **Access control**: Owner only.
-- **Trade-off**: Higher buffer = more instant liquidity but lower yield. Lower buffer = more yield but risk of failed instant payments.
-
-#### `setInvoiceContract(address invoiceContract)`
-- **What it does**: Sets which contract is authorized to call `settle()`. Must be called post-deployment to link EMEIInvoice.
-- **Access control**: Owner only.
-- **Critical**: Settlement is impossible until this is set.
-
-#### `setFacilitator(address facilitator)`
-- **What it does**: Sets which address is authorized to call `topUpFromYield()`, `withdrawTo()`, and `setSweepLimit()`.
-- **Access control**: Owner only.
-- **Use case**: Points to the Facilitator backend's hot wallet address.
-
----
-
-## 4. EMEIReceipt
-
-**File**: `src/EMEIReceipt.sol`  
-**Role**: Anchors Merkle roots of settled payment batches on-chain. Enables trustless verification that a specific payment was included in a batch.
-
-### Functions
-
-#### `postMerkleRoot(uint256 batchNumber, bytes32 merkleRoot)`
-- **What it does**: Posts a Merkle root for a numbered batch of settled invoices. The Facilitator's Batcher worker computes the root off-chain from all settled invoice hashes in the batch window and submits it here.
-- **Access control**: Only the authorized poster (Facilitator's hot wallet) can call this.
-- **Validation**: Root must be non-zero. Each batch number can only be posted once (prevents overwriting).
-
-#### `getMerkleRoot(uint256 batchNumber) → bytes32`
-- **What it does**: Returns the Merkle root for a specific batch number. Returns `bytes32(0)` if the batch hasn't been posted.
-- **Access control**: Public view function.
-- **Use case**: Clients fetch the root to verify their own inclusion proofs offline.
-
-#### `getLatestBatch() → uint256`
-- **What it does**: Returns the highest batch number that has been posted.
-- **Access control**: Public view function.
-- **Use case**: The Facilitator uses this to determine the next batch number.
-
-#### `verifyInclusion(uint256 batchNumber, bytes32 leaf, bytes32[] proof) → bool`
-- **What it does**: Verifies that a given leaf (payment hash) is included in the Merkle tree of the specified batch. Uses sorted-pair hashing (smaller hash first) for deterministic proof verification.
-- **Access control**: Public view function.
-- **Algorithm**: Iteratively hashes the leaf with each proof element (always sorting the pair), then compares the final computed root against the stored root.
-
----
-
-## 5. Bay8004
-
-**File**: `src/Bay8004.sol`  
-**Role**: Reputation gate adapter that reads from the ERC-8004 registry, applies weighted scoring, and exposes `scoreOf()` for the EMEI protocol.
-
-### Scoring Formula
+### Scoring model
 
 ```
-finalScore = min((rawScore × (txSizeWeight + timeDecayFactor + categoryWeight)) / 10000, 10000)
+Base score: 500 (auto-assigned on first interaction)
+Max: 10000, Min: 0
+
+Positive (payment confirmed):
+  points = log2(amount_in_dollars) + 1
+  if score > 800: points = points / 2 + 1  (soft cap)
+
+Negative (overdue):
+  points = log2(amount_in_dollars) + 1
+  if score < 300: points = points * 1.5    (amplified penalty)
 ```
 
-Default weights: txSizeWeight=3000 (30%), timeDecayFactor=2000 (20%), categoryWeight=5000 (50%). Sum=10000, so finalScore = rawScore (capped at 10000).
+### Example
 
-### Functions
+```
+Agent pays 100 USDC invoice:
+  → log2(100) + 1 = 8 points
+  → score: 500 → 508
 
-#### `scoreOf(address account) → uint256`
-- **What it does**: Computes a weighted reputation score for the given address by reading the raw score from the ERC-8004 registry and applying three weight factors. Caches the result for gas efficiency.
-- **Access control**: Public (non-view — it writes to cache and emits events).
-- **Failure**: Reverts with `RegistryUnavailable` if the registry call fails.
+Agent misses 50 USDC invoice (overdue):
+  → log2(50) + 1 = 7 points
+  → score 508 > 300, no amplification
+  → score: 508 → 501
 
-#### `giveFeedback(address subject, uint256 invoiceId, uint256 amount)`
-- **What it does**: Forwards feedback to the underlying ERC-8004 registry after a successful payment. Called by EMEIInvoice after both `pay()` and `collect()`.
-- **Access control**: Public (anyone can call, but only meaningful when called from EMEIInvoice).
-- **Effect**: Increases the subject's raw score in the registry by the feedback amount (capped at the registry's MAX_SCORE).
+Agent at score 250 misses another 10 USDC invoice:
+  → log2(10) + 1 = 5 points
+  → score < 300: amplified → 5 * 1.5 = 7 points
+  → score: 250 → 243 (penalties hurt more when trust is already low)
+```
 
-#### `setRegistry(address registry)`
-- **What it does**: Updates the address of the ERC-8004 reputation registry.
-- **Access control**: Owner only.
-- **Use case**: Migrate to a new registry implementation without redeploying Bay8004.
+### Gas savings
 
-#### `setWeights(uint256 txSizeWeight, uint256 timeDecayFactor, uint256 categoryWeight)`
-- **What it does**: Updates the three weight factors used in the scoring formula.
-- **Access control**: Owner only.
-- **Note**: Weights do not need to sum to 10000. If they sum to more, scores will be amplified; if less, scores will be dampened.
-
-#### `getThreshold() → uint256`
-- **What it does**: Returns the current minimum reputation threshold configured in this contract.
-- **Access control**: Public view function.
-- **Note**: This threshold is informational. The actual enforcement happens in EMEIInvoice via `minReputation`.
-
-#### `setThreshold(uint256 threshold)`
-- **What it does**: Updates the minimum reputation threshold stored in Bay8004.
-- **Access control**: Owner only.
-- **Note**: EMEIInvoice has its own `minReputation` which is the one actually enforced during invoice creation and payment.
+| Operation | Before | After |
+|-----------|--------|-------|
+| Register identity | 80k (ERC-8004 registry tx) | 0 (auto-init) |
+| Update score | 55k | 45k |
+| Read score | 5k (external call) | 2.1k (single SLOAD) |
 
 ---
 
-## 6. MockERC8004
+## 2. EMEIReceipt
 
-**File**: `src/mocks/MockERC8004.sol`  
-**Role**: Testnet implementation of the ERC-8004 reputation registry. Stores per-address scores and allows registration and feedback.
+### What changes
 
-### Functions
+| # | Change | Before | After |
+|---|--------|--------|-------|
+| 1 | AccessControl | `owner` + `poster` addresses | `DEFAULT_ADMIN_ROLE` + `POSTER_ROLE` + `PAUSER_ROLE` |
+| 2 | Zero-address validation | None | Constructor reverts on zero addresses |
+| 3 | Poster rotation | Redeploy needed | `grantRole(POSTER_ROLE, new)` + `revokeRole(old)` |
+| 4 | PosterUpdated event | None | Emitted on every role change |
+| 5 | Sequential batch enforcement | Can post batch 100 then batch 2 | Must post N+1 after N |
+| 6 | Custom errors | `require("string")` | `ZeroMerkleRoot()`, `BatchNotSequential()`, etc. |
+| 7 | OpenZeppelin MerkleProof | Custom implementation | `MerkleProof.verify()` (battle-tested) |
+| 8 | Metadata hash per batch | Only root stored | Root + IPFS CID hash per batch |
+| 9 | Posting pause | None | `pause()` stops posting, verification always works |
+| 10 | Timestamp validation | None | Min interval between posts (anti-spam) |
+| 11 | Batch count tracking | Derived from latestBatch | Explicit `totalBatches` counter |
+| 12 | Helper views | Only `getMerkleRoot` | `batchExists()`, `getMetadataHash()`, `totalBatches()` |
 
-#### `register(uint256 initialScore)`
-- **What it does**: Registers `msg.sender` in the identity registry with a specified initial score (capped at 10000).
-- **Access control**: Self-registration only. Each address can only register once.
-- **Revert**: `AlreadyRegistered` if the address has already registered.
+### Example
 
-#### `register()`
-- **What it does**: Registers `msg.sender` with a default initial score of 100.
-- **Access control**: Same as above.
-- **Use case**: Convenience overload for agents that don't need a custom starting score.
+```
+Facilitator posts batch 43:
+  postMerkleRoot(43, 0x16b9d2fd..., 0xIPFS_CID_HASH)
+  
+  Checks:
+  ✓ Caller has POSTER_ROLE
+  ✓ Not paused
+  ✓ Root is non-zero
+  ✓ Batch 43 == latestBatch(42) + 1
+  ✓ Time since last post >= minBatchInterval
+  ✓ Batch 43 not already posted
+  
+  Stores: root + metadata
+  Events: MerkleRootPosted(43, root), BatchMetadataSet(43, cid)
 
-#### `scoreOf(address account) → uint256`
-- **What it does**: Returns the current reputation score for an address. Returns 0 if the address is not registered.
-- **Access control**: Public view function.
-- **Range**: 0 to 10000.
+Anyone verifies receipt for invoice #730:
+  leaf = keccak256(abi.encode(730))
+  verifyInclusion(43, leaf, [sibling1, sibling2])
+  → MerkleProof.verify(proof, root, leaf) → true
+  → Works even during pause (view function)
+```
 
-#### `giveFeedback(address subject, uint256 invoiceId, uint256 amount)`
-- **What it does**: Increases the subject's score by the feedback amount. Capped at MAX_SCORE (10000). The invoiceId is used for event emission.
-- **Access control**: Public (in production, this would be restricted to authorized callers).
-- **Revert**: `NotRegistered` if the subject address hasn't registered.
+### Gas savings
 
-#### `isRegistered(address account) → bool`
-- **What it does**: Returns whether an address is registered in the identity registry.
-- **Access control**: Public view function.
-- **Use case**: Pre-check before attempting operations that require registration.
+| Operation | Before | After |
+|-----------|--------|-------|
+| postMerkleRoot | 55k | 52k (custom errors + packed state) |
+| verifyInclusion | 8k | 6k (OZ optimized MerkleProof) |
 
 ---
 
-## Cross-Contract Interaction Matrix
+## 3. EMEIMandate
 
-| Caller | Target | Function | When |
-|--------|--------|----------|------|
-| EMEIInvoice | EMEISettlement | `settle()` | On `pay()` or `collect()` |
-| EMEIInvoice | EMEIMandate | `validateAndDecrement()` | On `collect()` |
-| EMEIInvoice | Bay8004 | `scoreOf()` | On `createInvoice()` and `pay()` |
-| EMEIInvoice | Bay8004 | `giveFeedback()` | After successful `pay()` or `collect()` |
-| Bay8004 | MockERC8004 | `scoreOf()` | When EMEIInvoice checks reputation |
-| Bay8004 | MockERC8004 | `giveFeedback()` | When EMEIInvoice reports payment |
-| EMEISettlement | Conservative Satellite | `deposit()` / `redeem()` | On `settle()` / `withdraw()` |
-| EMEISettlement | Yield Satellite | `deposit()` / `redeem()` | On `settle()` / `withdraw()` / `topUpFromYield()` |
-| Facilitator | EMEISettlement | `topUpFromYield()` | Background sweeper detects low balance |
-| Facilitator | EMEISettlement | `withdrawTo()` | User requests withdrawal via dashboard |
-| Facilitator | EMEIReceipt | `postMerkleRoot()` | Every 30s batch cycle |
+### What changes
+
+| # | Change | Before | After |
+|---|--------|--------|-------|
+| 1 | AccessControl | `onlyOwner` | `DEFAULT_ADMIN_ROLE` + `INVOICE_ROLE` + `PAUSER_ROLE` |
+| 2 | EIP-712 signed creation | Direct tx only | `createMandateSigned(params, sig, deadline)` — facilitator pays gas |
+| 3 | Nonce replay protection | None | Per-address nonce, incremented on each signed op |
+| 4 | Pausable | None | `pause()` blocks all utilization |
+| 5 | Custom errors | `require("string")` | `InsufficientMandateCap()`, `CounterpartyLimitExceeded()`, etc. |
+| 6 | MandateUtilized event | Only MandateCreated/Revoked | `MandateUtilized(id, amount, remaining)` on every spend |
+| 7 | Auto-expiry in views | Expired shows as ACTIVE | `statusOf()` returns EXPIRED if past validUntil |
+| 8 | Duplicate validation | None | Rejects duplicate counterparties and categories |
+| 9 | Zero-address validation | None | Rejects zero-address counterparties |
+| 10 | Category as bytes32 | `string[]` (expensive) | `bytes32[]` (cheap, max 32 chars) |
+| 11 | Storage packing | Unpacked struct | 3 slots per mandate (down from 6-8) |
+| 12 | Signed revocation | Direct tx only | `revokeMandateSigned(id, sig, deadline)` — revoke from mobile |
+| 13 | Per-counterparty limits | Global cap only | Each counterparty can have its own sub-limit |
+| 14 | Mandate top-up | Must create new mandate | `topUp(mandateId, additionalCap)` adds to existing |
+| 15 | Recurring allowance reset | None | Configurable auto-reset every N days |
+| 16 | View helpers | Must fetch full struct | `remainingCapOf()`, `isExpired()`, `counterpartySpentOf()` |
+
+### Example: Signed creation (facilitator pays gas)
+
+```
+User signs off-chain (EIP-712):
+  domain: { name: "EMEIMandate", version: "2", chainId: 8453, contract: 0xMandate }
+  message: { 
+    payer: 0xUserAgent, spendCap: 500e6, 
+    counterparties: [0xCompute, 0xData],
+    categories: [bytes32("compute"), bytes32("data")],
+    counterpartyLimits: [300e6, 200e6],
+    validFrom: now, validUntil: now+30days,
+    resetIntervalDays: 30, resetAmount: 500e6,
+    nonce: 0, deadline: now+1hr
+  }
+
+Facilitator submits: createMandateSigned(params, signature, deadline)
+  → Verify EIP-712 sig from 0xUserAgent ✓
+  → Nonce 0 matches ✓
+  → No duplicate counterparties ✓
+  → No zero addresses ✓  
+  → Categories all ≤ 32 bytes ✓
+  → Creates mandate #15 with per-counterparty limits
+  → Gas: facilitator pays ~130k, user pays 0
+```
+
+### Example: Recurring reset
+
+```
+Mandate #15: 500 USDC/month, resets every 30 days.
+
+Day 1-29: Agent spends 480 USDC → remaining = 20 USDC
+Day 30: Next utilize() triggers _maybeResetAllowance():
+  → elapsed = 30 days, periods = 1
+  → remaining reset to 500 USDC
+  → MandateReset(15, 500e6)
+Day 31: Fresh budget, agent can spend 500 USDC again
+```
+
+### Gas savings
+
+| Operation | Before | After |
+|-----------|--------|-------|
+| createMandate | 200k (strings) | 130k (bytes32, packed) |
+| utilize | 60k | 45k (packed reads, custom errors) |
+| statusOf (view) | 5k | 2.5k (auto-expiry in view) |
+
+---
+
+## 4. EMEISettlement
+
+### What changes
+
+| # | Change | Before | After |
+|---|--------|--------|-------|
+| 1 | AccessControl | `onlyOwner` / `onlyFacilitator` | `INVOICE_ROLE` + `FACILITATOR_ROLE` + `PAUSER_ROLE` + `ASSET_MANAGER` |
+| 2 | Custom errors | `require("string")` | `ZeroAmount()`, `InsufficientBalance()`, etc. |
+| 3 | ReentrancyGuard | None | On settle/withdraw/topUp (Satellites are external) |
+| 4 | Pausable | None | Freeze settlements + withdrawals |
+| 5 | Asset whitelist | Hardcoded USDC only | `acceptedAssets` mapping (future multi-asset) |
+| 6 | Daily withdrawal limits | None | Configurable per-agent daily cap |
+| 7 | Settlement proof history | Single proof returned | `settlementProofs[invoiceId].push(proof)` |
+| 8 | Buffer pool cap | Unbounded | Max buffer size to prevent over-accumulation |
+| 9 | Emergency drain | None | `emergencyDrainBuffer(dest)` for last-resort recovery |
+| 10 | Satellite rotation | Redeploy needed | `setConservativeSatellite()` / `setYieldSatellite()` |
+| 11 | Storage packing | Unpacked mappings | `AgentVault` struct (2 slots) + `SettlementState` (1 slot) |
+| 12 | Constructor zero-checks | Partial | All addresses validated |
+
+### Example: Settlement with dual-vault routing
+
+```
+Invoice #42 paid: 100 USDC. Agent A's sweep limit = 50 USDC. Conservative balance = 30 USDC.
+
+settle(42, agentB, agentA, 100e6, USDC):
+  → Pull USDC from agentB ✓
+  → Conservative gap: 50 - 30 = 20 USDC → deposit 20 to Conservative
+  → Excess: 100 - 20 = 80 USDC
+  → Buffer (5%): 80 * 500 / 10000 = 4 USDC → bufferPool += 4
+  → Yield (95%): 80 - 4 = 76 USDC → deposit 76 to Yield Satellite
+  → Proof = keccak256(invoiceId, payer, payee, amount, shares, timestamp, block)
+  → settlementProofs[42].push(proof)
+  → Event: SettlementExecuted(42, agentA, 100e6, cShares, yShares, 4e6)
+```
+
+### Example: Daily withdrawal limit
+
+```
+Agent A tries to withdraw 600 USDC. Daily limit = 500 USDC. Already withdrew 200 today.
+
+withdraw(600e6):
+  → 200 + 600 = 800 > 500
+  → revert DailyWithdrawLimitExceeded(agentA, 600e6, 300e6)
+  
+withdraw(300e6):  // retry with allowed amount
+  → 200 + 300 = 500 ≤ 500 ✓
+  → Waterfall: Conservative → Yield → Buffer
+  → Transfer 300 USDC to agent ✓
+```
+
+### Gas savings
+
+| Operation | Before | After |
+|-----------|--------|-------|
+| settle (Conservative only) | 75k | 65k |
+| settle (full split) | 120k | 105k |
+| withdraw (single source) | 60k | 55k |
+| getVaultBalance (view) | 8k | 6k |
+
+---
+
+## 5. EMEIInvoice
+
+### What changes
+
+| # | Change | Before | After |
+|---|--------|--------|-------|
+| 1 | Milestone overdue fix | Always checks milestone[0] | Checks first UNPAID milestone |
+| 2 | Non-blocking feedback | Reverts if Bay8004 fails | `try reputation.addPositive(...) catch` |
+| 3 | Custom errors | `require("string")` | `InvalidStatusTransition()`, `InvoiceExpired()`, etc. |
+| 4 | Upgradeable deps | Hardcoded addresses | `setReputation()`, `setSettlement()`, `setMandate()` with events |
+| 5 | Settlement proofs | Not stored on invoice side | Stored via Settlement, queryable per invoice |
+| 6 | AccessControl | `onlyOwner` | `ADMIN_ROLE`, `ARBITER_ROLE`, `FACILITATOR_ROLE`, `PAUSER_ROLE` |
+| 7 | Invoice expiry | None | `expiresAt` field, checked on pay/collect/present |
+| 8 | Explicit category | Derived from first line item | `bytes32 category` field on creation |
+| 9 | Storage packing | 8-10 slots per invoice | 3 slots (PackedInvoice + Parties + Payment) |
+| 10 | Settlement freeze | None | `whenNotFrozen` on pay/collect, separate from pause |
+| 11 | State transition lib | Scattered if/else | `InvoiceStateLib.validateTransition()` |
+| 12 | EIP-712 signatures | None | `createInvoiceSigned()`, `acceptInvoiceSigned()` |
+| 13 | Metadata hashing | Full strings on-chain | `bytes32 metadataHash` (IPFS CID), line items off-chain |
+| 14 | Invoice NFT | None | ERC-721 — mint on create, payment follows `ownerOf()` |
+
+### Example: EIP-712 signed creation (facilitator pays gas)
+
+```
+Agent A signs off-chain:
+  domain: { name: "EMEIInvoice", version: "2", chainId: 8453, contract: 0xInvoice }
+  message: {
+    payer: 0xBuyer, amount: 5e6, asset: USDC,
+    category: bytes32("compute"), termType: DUE_ON_RECEIPT,
+    collectionMode: MANDATE, expiresAt: now+7days,
+    metadataHash: 0xIPFS_CID,
+    nonce: 3, deadline: now+1hr
+  }
+
+Facilitator submits: createInvoiceSigned(params, signature, deadline)
+  → Verify EIP-712 sig ✓, nonce ✓, deadline ✓
+  → Mint NFT #751 to signer (Agent A)
+  → Pack into 3 storage slots
+  → Gas: facilitator pays ~120k, Agent A pays 0
+```
+
+### Example: NFT transfer (invoice factoring)
+
+```
+Agent A owns invoice NFT #751 (5 USDC owed to them).
+Factoring service buys it off-chain for 4.8 USDC (discount).
+
+Agent A: transferFrom(agentA, factoringService, 751)
+  → ownerOf(751) = factoringService
+
+When buyer pays invoice #751:
+  → settlement.settle(751, buyer, ownerOf(751), 5e6, USDC)
+  → Funds go to factoringService's vault (they own the NFT)
+  → Agent A already got 4.8 USDC from the factoring deal (off-chain)
+```
+
+### Example: Milestone invoice with partial payments
+
+```
+Invoice #80: 3 milestones (10 + 20 + 20 USDC)
+
+payMilestone(80, 0) → settles 10 USDC, milestonePaid = 1, state stays PRESENTED
+payMilestone(80, 1) → settles 20 USDC, milestonePaid = 2, state stays PRESENTED
+
+Day 45: milestone[2].dueDate passed, not paid.
+markOverdue(80):
+  → InvoiceStateLib checks: first unpaid milestone = index 2
+  → milestone[2].dueDate < now ✓
+  → State: PRESENTED → OVERDUE
+  → try reputation.addNegative(payer, 80, 20e6) catch {}
+
+payMilestone(80, 2) → settles 20 USDC, all done → state: PAID
+  → try reputation.addPositive(payer, 80, 20e6) catch {}
+```
+
+### Gas savings
+
+| Operation | Before | After |
+|-----------|--------|-------|
+| createInvoice | 180k (strings, unpacked) | 120k (packed, bytes32, no strings) |
+| pay | 95k | 75k |
+| collect | 110k | 85k |
+| markOverdue | 55k | 45k |
+| transfer (NFT) | N/A | 50k |
+
+---
+
+## Implementation Order
+
+```
+1. EMEIReputation    (~150 lines)  — No dependencies
+2. EMEIReceipt       (~150 lines)  — No dependencies  
+3. EMEIMandate       (~300 lines)  — No dependencies
+4. EMEISettlement    (~350 lines)  — Depends on ISatellite interface
+5. EMEIInvoice       (~400 lines)  — Depends on Reputation + Settlement + Mandate + Receipt
+```
+
+Each contract gets:
+- Implementation (src/)
+- Interface (src/interfaces/)
+- Custom errors (src/libraries/)
+- Unit tests (test/)
+- Fuzz tests (test/)
+- Deploy script (script/)
+
+---
+
+## File Structure After Implementation
+
+```
+EMEI/
+├── src/
+│   ├── EMEIInvoice.sol
+│   ├── EMEIMandate.sol
+│   ├── EMEIReceipt.sol
+│   ├── EMEIReputation.sol
+│   ├── EMEISettlement.sol
+│   ├── interfaces/
+│   │   ├── IEMEIInvoice.sol
+│   │   ├── IEMEIMandate.sol
+│   │   ├── IEMEIReceipt.sol
+│   │   ├── IEMEIReputation.sol
+│   │   ├── IEMEISettlement.sol
+│   │   └── ISatellite.sol
+│   ├── libraries/
+│   │   ├── InvoiceStateLib.sol
+│   │   ├── InvoiceErrors.sol
+│   │   ├── MandateErrors.sol
+│   │   ├── ReceiptErrors.sol
+│   │   ├── ReputationErrors.sol
+│   │   └── SettlementErrors.sol
+│   └── mocks/
+│       ├── MockSatellite.sol
+│       ├── MockUSDC.sol
+│       ├── MaliciousSatellite.sol
+│       └── MaliciousReputation.sol
+├── test/
+│   ├── EMEIInvoice.t.sol
+│   ├── EMEIInvoice.fuzz.t.sol
+│   ├── EMEIInvoice.invariant.t.sol
+│   ├── EMEIMandate.t.sol
+│   ├── EMEIMandate.fuzz.t.sol
+│   ├── EMEIReceipt.t.sol
+│   ├── EMEIReceipt.invariant.t.sol
+│   ├── EMEIReputation.t.sol
+│   ├── EMEISettlement.t.sol
+│   ├── EMEISettlement.security.t.sol
+│   └── Integration.t.sol           — Full flow end-to-end
+├── script/
+│   └── Deploy.s.sol
+└── UPGRADE.md                       — This file
+```
+
+---
+
+## Total Gas Savings Estimate
+
+| Scenario (1000 invoices) | Before | After | Savings |
+|--------------------------|--------|-------|---------|
+| 1000 createInvoice | 180M gas | 120M gas | 33% |
+| 1000 pay (mandate collect) | 110M gas | 85M gas | 23% |
+| 1000 reputation updates | 55M gas | 45M gas | 18% |
+| 500 markOverdue | 27.5M gas | 22.5M gas | 18% |
+| 40 postMerkleRoot | 2.2M gas | 2.1M gas | 5% |
+| **Total protocol gas/month** | **~375M** | **~275M** | **~27%** |
+
+At Base gas prices (~0.001 gwei L2), this saves roughly **$0.10/month per 1000 invoices**. The real value is security, maintainability, and operational flexibility — not gas dollars on an L2.
+
+---
+
+## Breaking Changes
+
+1. **Bay8004 → EMEIReputation**: All integrations calling `giveFeedback()` must switch to `addPositive()`/`addNegative()`. The InvoiceContract calls change.
+2. **ERC-8004 removal**: No more `register()` for identity. Scores auto-init on first interaction.
+3. **Mandate categories**: `string[]` → `bytes32[]`. Frontend must convert strings to bytes32 before calling.
+4. **Invoice IDs**: Now also ERC-721 token IDs. `ownerOf(invoiceId)` = payee (transferable).
+5. **Settlement**: `onlyInvoiceContract` → `onlyRole(INVOICE_ROLE)`. Must grant role after deploy.
+6. **Receipt**: `postMerkleRoot(batchNumber, root)` → `postMerkleRoot(batchNumber, root, metadataHash)`. Facilitator batcher must pass metadata.
+
+---
+
+## Approve to proceed?
+
+Review the above. If it looks good, say "go" and I'll implement in order:
+1. EMEIReputation
+2. EMEIReceipt
+3. EMEIMandate
+4. EMEISettlement
+5. EMEIInvoice
