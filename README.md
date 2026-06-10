@@ -61,7 +61,7 @@ Two distinct planes are the heart of the design:
 
 ---
 
-## 3. The custody & key model (final — "Option A")
+## 3. The custody & key model
 
 ### 3.1 The actors
 - **User (root):** the human. Owns a **Turnkey sub-org** (their vault). Full control.
@@ -153,7 +153,6 @@ sequenceDiagram
 ```
 
 - Keypair is generated **client-side**; FORTRESS stores only the **public `API_ID`**.
-- The agent is created **non-root directly** — **no `UPDATE_ROOT_QUORUM`** needed per agent.
 - **Limits are encoded in the Turnkey policy**, because the agent can reach Turnkey directly.
 
 ---
@@ -196,13 +195,8 @@ against the stored `API_ID`.
 (MCP → backend). **What never crosses:** `API_SECRET` (stays in the MCP process) and the wallet key
 (stays in Turnkey's TEE).
 
-**Reused vs new:**
-| Reused (from `BACKEND_DESIGN.md`) | New for MCP |
-|---|---|
-| Service traits, `/capabilities` + schemas, simulation, outbox, nonce reservation, broadcast/confirm/finalize workers, x402 module, audit, `api_keys` | `fortress-mcp` (stdio + HTTP/SSE), the `/prepare`+`/submit` split, **local stamping with `API_SECRET`**, L1 JWT verification |
 
 > Behavioral change: the broadcast worker **no longer signs** — it broadcasts an already-signed tx.
-
 ---
 
 ## 8. Runtime flows
@@ -277,27 +271,6 @@ You bring the brain (any LLM); FORTRESS brings the treasury + payments. No keys,
 | **Rotate** | add new authenticator, remove old | new keypair → add → delete old |
 | **Revoke** | n/a (it's root) | delete the agent user → instant kill |
 | **Recover** | email + OTP → new authenticator | none — **rotate** (issue new, revoke old) |
-
----
-
-## 13. What to build (MVP) vs. defer (v2)
-
-**Build now:** `fortress-mcp` (stdio + HTTP/SSE) with `/prepare`+`/submit`; the FORTRESS delegated
-account + agent provisioning (`CREATE_USER`/`CREATE_POLICY`); onboarding (email/OTP → sub-org +
-embedded wallet); per-agent policies; thin SDKs (TS/Rust/Python).
-**Reuse as-is:** outbox, nonces, simulation, workers, x402 module, audit, capabilities.
-**Defer to v2:** on-chain **Envelope** (move limits on-chain for trustless enforcement); running your
-own x402 facilitator (monetization); self-hosted Nitro Enclave (replace Turnkey as the key plane).
-
----
-
-## 14. Reference (Base mainnet)
-
-| Contract | Address |
-|----------|---------|
-| Satellite (frtUSD-C) | `0x1493522095857A3e28e6573E8a1f6b612dd30B40` |
-| USDC | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
-| AttestationRelay | `0x1f2Bda259365BF10210AB6C8C0F4A211eE2be5FC` |
 
 ---
 
