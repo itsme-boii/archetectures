@@ -1,257 +1,232 @@
-# Agent Platform Architectures — and where FORTRESS fits
+# How Agents Use FORTRESS — Platform Architectures & Integration Flows
 
-**Purpose:** A detailed, readable breakdown of how the 5 biggest on-chain AI-agent platforms of
-2026 actually work — their architecture and how their agents act in the market — so we can pinpoint
-where FORTRESS (treasury + payments + guardrails) plugs in.
+**Purpose:** explain, in easy terms but at institution grade, exactly **how any AI agent uses
+FORTRESS** — whether it runs on ElizaOS, Virtuals, Rig, Claude/MCP, ZerePy, Olas, or is something a
+developer builds from scratch. It covers the **one universal model**, the **security model**
+(delegated wallets + two auth layers), the **runtime flow**, and then the **per-platform wiring**.
 
-> External facts below are paraphrased from the linked sources for licensing compliance. Each
-> platform section ends with a **FORTRESS touchpoint** (clearly marked) — candidate integration
-> spots, not claims about the platform.
-
-**TL;DR of where FORTRESS fits:** every one of these frameworks has a clean "action/tool/function"
-extension point and a money problem (idle float + paying for things). FORTRESS attaches at the
-**action layer** (as a tool/plugin) and becomes the **treasury + payment rail** behind the agent.
+> External facts are paraphrased from the linked sources for licensing compliance.
 
 ---
 
-## 1. ElizaOS (ai16z) — the agent operating system
+## Part 1 — The universal model (true for EVERY agent)
 
-**What it is:** an open-source TypeScript "agent OS." A developer writes a *Character* (personality
-+ config), and the runtime brings it to life across chat platforms and chains.
-
-**Core architecture** — everything is orchestrated by the **AgentRuntime**, which turns a static
-Character into a live agent [(runtime docs)](https://docs.elizaos.ai/agents/runtime-and-lifecycle).
-Capabilities are added as **plugins**, and a plugin is just a manifest of four component types
-[(plugin architecture)](https://docs.elizaos.ai/plugins/architecture):
-
-| Component | Role (paraphrased from docs) | Analogy |
-|-----------|------------------------------|---------|
-| **Actions** | Execute tasks — call APIs, send messages, do on-chain ops [(components)](https://docs.elizaos.ai/plugins/components) | The hands |
-| **Providers** | Gather data from memory/services/external sources and feed it into the LLM prompt [(providers)](https://docs.elizaos.ai/runtime/providers) | The senses |
-| **Evaluators** | Post-process interactions, extract facts, learn | The reflection |
-| **Services** | Long-running connections + background jobs (Discord, DBs, schedulers) [(services)](https://docs.elizaos.ai/runtime/services) | The organs |
-
-Plus a **Memory system**: hierarchical storage for conversations, knowledge, and state, with
-vector search/RAG so the agent keeps context [(memory)](https://docs.elizaos.ai/runtime/memory).
-
-```mermaid
-graph TB
-    CHAR[Character config] --> RT[AgentRuntime]
-    subgraph "Runtime loop"
-        PROV[Providers gather context] --> LLM[LLM decides]
-        LLM --> ACT[Actions execute]
-        ACT --> EVAL[Evaluators learn]
-        EVAL --> MEM[(Memory / vector store)]
-        MEM --> PROV
-    end
-    RT --> PROV
-    SVC[Services: Discord/X/DB] --- RT
-```
-
-**How its agents act in the market:** a character connects to X/Discord/Telegram and to chains
-(Solana, Ethereum, Base, BSC); plugins give it trading, posting, and contract-interaction actions.
-It perceives (providers) → decides (LLM) → acts (actions) → learns (evaluators), continuously.
-
-**FORTRESS touchpoint:** publish **`@fortress/plugin`** exposing Actions `deposit`, `withdraw`,
-`pay`, `balance` (+ a Provider that reports the agent's frtUSD balance/yield into the prompt so the
-LLM can reason about its treasury). Highest-leverage integration because of the plugin ecosystem.
-
----
-
-## 2. Virtuals Protocol (VIRTUAL) — launchpad + agent commerce
-
-**What it is:** a launchpad that **tokenizes** agents (co-ownership, paired with $VIRTUAL
-liquidity) plus the runtime (**GAME**) and an inter-agent economy (**ACP**).
-
-### 2a. GAME — the decision engine
-GAME is a modular agentic framework that separates **planning from execution**
-[(whitepaper)](https://whitepaper.virtuals.io/developer-documents/game-framework),
-[(Messari)](https://messari.io/article/understanding-virtuals-protocol-a-comprehensive-overview):
-
-- **HLP (High-Level Planner)** = the brain; produces tasks.
-- **LLP Workers** = the hands and legs; each Worker owns **Functions** (the concrete actions it can
-  take) and runs an **agentic loop**: take state → pick a task → execute a function → get result →
-  refresh state → repeat [(GAME overview)](https://docs.game.virtuals.io/game-overview),
-  [(reply worker docs)](https://docs.game.virtuals.io/how-to/articles/game-cloud-how-to-define-reply-worker-and-worker-prompts).
-
-```mermaid
-graph TB
-    HLP[HLP - High Level Planner<br/>the brain: generates tasks] --> W1[Worker A]
-    HLP --> W2[Worker B]
-    subgraph "Worker agentic loop"
-        STATE[state] --> PICK[pick task]
-        PICK --> FN[execute Function]
-        FN --> RES[result]
-        RES --> GET[get_state] --> STATE
-    end
-    W1 --> STATE
-    W1 -.has.-> FNS[Functions = actions]
-```
-
-### 2b. ACP — Agent Commerce Protocol
-ACP lets autonomous agents transact with each other, recorded on-chain for auditability
-[(ACP overview)](https://whitepaper.virtuals.io/get-started-with-acp). Four phases: **request →
-negotiation → transaction → evaluation**, where specialized **evaluator agents** check that a job
-met its terms [(technical deep dive)](https://whitepaper.virtuals.io/about-virtuals/agent-commerce-protocol-acp/technical-deep-dive).
-Settlement uses x402.
-
-```mermaid
-sequenceDiagram
-    participant Buyer as Buyer agent
-    participant Seller as Seller agent
-    participant Eval as Evaluator agent
-    participant Chain as On-chain record + x402
-    Buyer->>Seller: 1. Request (job spec)
-    Buyer->>Seller: 2. Negotiate terms
-    Buyer->>Chain: 3. Transaction (escrow / pay via x402)
-    Seller->>Eval: 4. Evaluation (terms met?)
-    Eval->>Chain: verdict recorded
-```
-
-**How its agents act in the market:** an agent is launched + tokenized, runs on GAME (HLP plans,
-Workers execute Functions), and earns by selling services to other agents through ACP, settling in
-x402. Reportedly 15,800+ agents and ~$477M cumulative agentic GDP
-[(rpcfast)](https://rpcfast.com/blog/how-ai-agents-trade-onchain).
-
-**FORTRESS touchpoint:** two spots — (1) a GAME **Function pack** (`fortress_deposit`,
-`fortress_pay`) so Workers can treasury/pay; (2) sit **behind the ACP transaction phase** as the
-treasury + x402 settlement + audit layer (agents park earnings in frtUSD, pay out JIT). You
-complement ACP, not replace it.
-
----
-
-## 3. Rig (ARC) — the Rust performance framework
-
-**What it is:** a Rust library for modular, lightweight, "fullstack" LLM agents, by 0xPlaygrounds
-[(rig docs)](https://docs.rig.rs/), [(repo)](https://github.com/0xPlaygrounds/rig).
-
-**Core architecture** — built on Rust traits for composability:
-
-| Primitive | Role (paraphrased) |
-|-----------|--------------------|
-| **Providers** | Completion + embedding model backends |
-| **Agent** | High-level abstraction combining model + context + tools + config [(agent)](https://docs.rig.rs/docs/concepts/agent) |
-| **Tools** | Callable functions; a tool can be stored in a vector store for RAG-style retrieval [(tools)](https://docs.rig.rs/docs/concepts/tools) |
-| **VectorStore / VectorStoreIndex** | Common traits for vector search backends (Qdrant, pgvector, etc.) [(architecture)](https://docs.rig.rs/docs/architecture) |
+No matter the framework, using FORTRESS is always the **same three steps**:
 
 ```mermaid
 graph LR
-    PROV[Provider: LLM + embeddings] --> AG[Agent]
-    TOOLS[Tools = functions] --> AG
-    VS[(VectorStore / Index)] --> AG
-    AG --> APP[Your app: chatbot / RAG / trading agent]
+    A[1. Developer registers<br/>login with wallet -> Turnkey sub-org] --> B[2. Create agent<br/>delegated wallet + credential]
+    B --> C[3. Plug credential into the framework<br/>ElizaOS / Virtuals / Rig / Claude / custom]
+    C --> D[Agent calls fortress.deposit / pay / balance]
 ```
 
-**How its agents act in the market:** developers compose an Agent with a model, a set of Tools
-(including on-chain actions), and optional RAG; the binary runs anywhere Rust runs. Appeals to
-infra/perf-sensitive and trading teams.
+1. **Developer registers** — logs into the FORTRESS dashboard with their wallet. Turnkey creates a
+   private **sub-org** (their vault) where **their wallet is the root owner**.
+2. **Create an agent** — one click provisions a **delegated wallet** (an agent address inside that
+   vault) plus a **scoped credential** (an API key the agent signs requests with).
+3. **Plug it in** — the developer pastes that credential into their agent's framework (or our SDK).
+   The agent instantly gains tools: `fortress.deposit`, `fortress.withdraw`, `fortress.pay`,
+   `fortress.balance`.
 
-**FORTRESS touchpoint:** ship a **Rust SDK** implementing Rig `Tool`s (`FortressDeposit`,
-`FortressPay`). Since the FORTRESS backend is already Rust, this is the most natural fit — your
-treasury tools drop straight into a Rig agent.
+That's it. The agent itself is never rewritten — it just gains a treasury.
 
 ---
 
-## 4. ZerePy (ZEREBRO) — the Python social-agent framework
+## Part 2 — The security model (easy terms)
 
-**What it is:** an open-source Python framework for AI agents (by Blorm, with roots in the Zerebro
-agent) [(repo)](https://github.com/blorm-network/ZerePy). Strong for social/creative agents that
-post and transact.
+Two ideas make this safe. Read these once and the rest of the doc is obvious.
 
-**Core architecture** — modular and config-driven:
+### Idea 1 — The agent uses a *delegated wallet*, never the keys
+The wallet's private key lives inside **Turnkey's secure enclave (TEE)** and never leaves. The
+**user owns the wallet** (their login is the "root" owner). FORTRESS gets only a **delegated key**
+with a **policy** (e.g., "only deposit/withdraw/pay on Satellite + USDC, max $500/day"), so the
+agent can act 24/7 **without** the human, while the user keeps full control and **can revoke
+anytime** — this is Turnkey's delegated-access model [(Turnkey)](https://docs.turnkey.com/concepts/policies/delegated-access-overview).
 
-| Piece | Role |
-|-------|------|
-| **Agent config (JSON)** | Personality + which connections/LLM to use |
-| **Connections** | Pluggable integrations: X/Twitter, Discord, Farcaster, and chains (Solana, EVM) |
-| **Actions** | Things the agent can do per connection (post, reply, transfer) |
-| **LLM providers** | OpenAI/Anthropic/etc. swappable |
-| **Agent loop (CLI)** | Perceive → decide → act, repeated |
+### Idea 2 — There are two separate auth layers (don't mix them)
+
+| Layer | Credential | Answers | Checked by |
+|-------|-----------|---------|------------|
+| **L1: Agent → FORTRESS** | API key + short-lived **signed JWT** | "Is this a legit agent?" | FORTRESS |
+| **L2: FORTRESS → Turnkey** | Delegated key + policy (root = the user) | "Can the wallet actually sign this?" | Turnkey |
+
+The agent's credential lives **only in L1**. The signing keys live in **L2**, in the TEE. So if the
+agent's credential is ever stolen, the attacker still can't reach the keys and can't exceed the
+policy — and the user revokes it instantly. **A leaked agent credential is bounded; it is not a
+drained wallet.**
+
+---
+
+## Part 3 — The universal runtime flow (one picture for all platforms)
+
+Every platform below ends up doing exactly this when the agent acts:
+
+```mermaid
+sequenceDiagram
+    participant AG as Agent (any framework)
+    participant F as FORTRESS (L1: verify JWT + limits + simulate)
+    participant TK as Turnkey (L2: delegated key + policy)
+    participant SAT as Satellite (frtUSD) / x402
+
+    AG->>F: fortress.deposit / pay  (+ signed JWT)
+    F->>F: verify agent, check limit, eth_call simulate
+    F->>TK: sign, authorized by the delegated key
+    TK->>TK: check policy -> wallet key in TEE signs
+    TK-->>F: signed tx
+    F->>SAT: broadcast (deposit -> frtUSD yield)  or  redeem + x402 settle (pay)
+    F-->>AG: done + receipt (audited, provable on 0G DA)
+```
+
+So the **only thing that differs per platform is step 1** — *how the agent is wired to call the
+tool*. Everything after is identical. The rest of this doc is just "how each platform does step 1."
+
+---
+
+## Part 4 — Per-platform usage
+
+Each section: what the platform is, how its agents act in the market, and **how it connects to
+FORTRESS** (the concrete step-1 wiring).
+
+### 4.1 ElizaOS (ai16z) — the agent operating system
+**What it is:** an open-source TypeScript "agent OS." A *Character* config + the **AgentRuntime**
+brings an agent to life; capabilities are added as **plugins** (Actions = do things, Providers =
+gather info, Evaluators = learn, Services = background jobs) with a vector **Memory**
+[(runtime)](https://docs.elizaos.ai/agents/runtime-and-lifecycle), [(plugins)](https://docs.elizaos.ai/plugins/architecture).
+
+**How its agents act:** live on X/Discord/Telegram and chains (Solana, Ethereum, Base, BSC); trade,
+post, manage community funds.
+
+**How it uses FORTRESS (config only — native MCP support):**
+```json
+// character.json
+{ "plugins": ["@elizaos/plugin-mcp"],
+  "settings": { "mcp": { "servers": {
+    "fortress": { "url": "https://mcp.fortress.exchange",
+                  "headers": { "Authorization": "Bearer <agent JWT>" } } } } } }
+```
+The agent now sees `fortress.deposit/pay/...`. (Optionally ship a branded `@fortress/plugin` that
+also feeds balance/yield into the prompt via a Provider.)
+
+### 4.2 Virtuals Protocol (VIRTUAL) — launchpad + agent commerce
+**What it is:** a launchpad that tokenizes agents, the **GAME** engine (an **HLP** brain plans tasks;
+**Worker** hands run **Functions** in a loop), and **ACP** — agent-to-agent commerce in 4 phases
+(request -> negotiate -> transaction -> evaluation) settled in x402
+[(GAME)](https://whitepaper.virtuals.io/about-virtuals/agentic-framework-game), [(ACP)](https://whitepaper.virtuals.io/get-started-with-acp).
+
+**How its agents act:** sell services to other agents and earn fees constantly (~15,800+ agents,
+~$477M agentic GDP) [(rpcfast)](https://rpcfast.com/blog/how-ai-agents-trade-onchain).
+
+**How it uses FORTRESS:** wrap a FORTRESS call inside a GAME **Function** —
+```python
+def fortress_pay(url, amount): return mcp_call("fortress","fortress.pay",{"url":url,"amount":amount})
+```
+and sit **behind the ACP transaction phase** as the treasury + x402 settlement + audit layer (agents
+park earnings in frtUSD, pay out just-in-time).
+
+### 4.3 Rig (ARC) — the Rust performance framework
+**What it is:** a Rust library for modular LLM agents (Provider + Agent + **Tools** + vector store),
+by 0xPlaygrounds [(rig)](https://docs.rig.rs/).
+
+**How its agents act:** high-performance trading/data bots; favored by infra/quant teams.
+
+**How it uses FORTRESS (native MCP via `rig-mcp`):**
+```rust
+let fortress = rig_mcp::from_server("https://mcp.fortress.exchange", "<agent JWT>").await?;
+let agent = client.agent("gpt-…").tools(fortress).build();  // fortress tools become Rig tools
+```
+[(Rig MCP)](https://docs.rig.rs/docs/integrations/model_context_protocol). Since the FORTRESS backend
+is Rust, this is the most natural fit.
+
+### 4.4 Claude / any MCP host — zero-code
+**What it is:** any MCP-speaking host (Claude Desktop, Cursor, IDEs).
+
+**How it uses FORTRESS:**
+```json
+{ "mcpServers": { "fortress": {
+    "command": "fortress", "args": ["mcp"], "transport": "stdio",
+    "env": { "FORTRESS_MCP_TOKEN": "<agent JWT>" } } } }
+```
+The model can now call `fortress.deposit/pay/...` directly. OpenAI's Responses API connects the same
+way (remote MCP tool) [(OpenAI)](https://openai.com/index/new-tools-and-features-in-the-responses-api).
+
+### 4.5 ZerePy (ZEREBRO) — Python social agents
+**What it is:** a Python framework (Connections + Actions + LLM providers) for social/creative
+agents [(repo)](https://github.com/blorm-network/ZerePy).
+
+**How its agents act:** post on X/Farcaster, light on-chain activity.
+
+**How it uses FORTRESS:** add a **Fortress connection** exposing `deposit`/`pay` — gives social
+agents a treasury and the ability to pay for content/AI APIs from earnings.
+
+### 4.6 Olas / Autonolas (OLAS) — autonomous services
+**What it is:** always-on services built as multi-agent **FSM** apps, replicated across operators,
+paying for AI work via **Mech** [(Open Autonomy)](https://stack.olas.network/open-autonomy/guides/overview_of_the_development_process/).
+
+**How its agents act:** persistent traders/keepers that constantly pay for inference.
+
+**How it uses FORTRESS:** an FSM `PAY`/`FUND` state calls `fortress.pay`; FORTRESS is the
+yield-earning operating treasury behind the service.
+
+---
+
+## Part 5 — Building your own agent (from scratch)
+
+Someone with no framework still uses the **same three steps**:
+
+1. **Register** on the FORTRESS dashboard (wallet login) -> get a vault.
+2. **Create an agent** -> get the agent's address + a **signed-JWT credential**.
+3. **Call FORTRESS** one of two ways:
+   - **MCP** — point any MCP client at `https://mcp.fortress.exchange` with the credential, or
+   - **SDK/REST** — use the FORTRESS SDK (TS/Python/Rust) or hit REST directly:
+     ```
+     POST https://api.fortress.exchange/agents/{id}/deposit
+     Authorization: <signed JWT>      { "amount": "5000000" }
+     ```
+
+The agent provides its own brain (any LLM/logic); FORTRESS provides the treasury + payments. No
+blockchain code, no key management.
+
+---
+
+## Part 6 — Summary: one backend, many doors
 
 ```mermaid
 graph TB
-    CFG[Agent JSON config] --> LOOP[Agent loop]
-    LOOP --> LLM[LLM provider]
-    LOOP --> CONN[Connections]
-    CONN --> X[X / Discord / Farcaster]
-    CONN --> CHAIN[Solana / EVM actions]
+    E[ElizaOS] --> MCP[FORTRESS MCP / SDK]
+    V[Virtuals] --> MCP
+    R[Rig] --> MCP
+    C[Claude / OpenAI] --> MCP
+    Z[ZerePy] --> MCP
+    O[Olas] --> MCP
+    CU[Your custom agent] --> MCP
+    MCP --> L1[L1: verify signed JWT + limits]
+    L1 --> L2[L2: Turnkey delegated key + policy]
+    L2 --> TEE[Wallet key signs in TEE]
+    TEE --> OUT[Satellite frtUSD yield · x402 pay · 0G DA audit]
 ```
 
-**How its agents act in the market:** mostly social presence + light on-chain activity; the agent
-posts content and can execute token actions through its blockchain connection.
+| Platform | How it connects | Effort |
+|----------|-----------------|--------|
+| ElizaOS | native MCP plugin -> add server in config | Config only |
+| Claude / OpenAI / any MCP host | add the `fortress` MCP server | Config only |
+| Rig | `rig-mcp` wraps tools | Config + a few lines |
+| Virtuals | wrap a call in a GAME Function; sit behind ACP | Small |
+| ZerePy | a Fortress connection | Small |
+| Olas | FSM state calls the tool | Small |
+| Custom | MCP client or SDK/REST | Small |
 
-**FORTRESS touchpoint:** add a **Fortress connection** (Python) exposing `deposit`/`pay` actions
-— gives social agents a treasury + the ability to pay for compute/content APIs from earnings.
+### The one-paragraph takeaway
+> Every agent — on any platform — uses FORTRESS the same way: the **developer registers** (wallet
+> login -> Turnkey vault, user is root owner), **creates an agent** (a **delegated wallet** + a
+> signed-JWT credential, limited by policy and revocable), and **plugs the credential into their
+> framework**. At runtime the agent calls `fortress.deposit/pay`; FORTRESS verifies the agent (L1),
+> Turnkey's delegated key signs inside the TEE within policy (L2), and the money parks as
+> yield-bearing frtUSD or settles via x402 — all audited on 0G DA. ElizaOS/Claude/OpenAI/Rig connect
+> with near-zero code via MCP; Virtuals/ZerePy/Olas need a tiny wrapper; custom agents use MCP or the
+> SDK. **One backend, many doors — and the agent never holds a key.**
 
----
-
-## 5. Olas / Autonolas (OLAS) — autonomous agent services
-
-**What it is:** a stack for building **autonomous services** as *multi-agent systems* run by many
-operators — closer to "decentralized always-on services" than single chatbots.
-
-**Core architecture** — the **Open Autonomy** framework
-[(dev process)](https://stack.olas.network/open-autonomy/guides/overview_of_the_development_process/):
-
-- Business logic lives in an **FSM App** (a finite state machine) inside each agent instance —
-  states encode the steps the service performs.
-- A service is **replicated across multiple operator-run agents** that reach consensus (a
-  mini-consensus per service) for fault tolerance.
-- An **on-chain protocol** registers composable units: **components → agents → services**, with
-  staking/rewards for operators.
-- **Mech** = a marketplace where agents pay for inference/work requests; **Pearl** = an app-store to
-  run agents locally.
-
-```mermaid
-graph TB
-    subgraph "One Olas service"
-        A1[Agent instance 1<br/>FSM App] --- A2[Agent instance 2<br/>FSM App]
-        A2 --- A3[Agent instance 3<br/>FSM App]
-        A1 -. consensus .- A3
-    end
-    REG[On-chain registry:<br/>components -> agents -> services] --> A1
-    A1 --> MECH[Mech: pay-per-inference marketplace]
-```
-
-**How its agents act in the market:** persistent services (e.g., prediction-market traders,
-keepers) run continuously, coordinated on-chain, paying for AI work via Mech, funded by an
-operating treasury.
-
-**FORTRESS touchpoint:** be the **operating treasury** for a service — idle service funds earn
-yield as frtUSD, and the service pays Mech/inference costs via `fortress.pay`. FSM states like
-`PAY` or `FUND` call FORTRESS.
-
----
-
-## Cross-platform pattern (the reusable insight)
-
-Despite different languages, all five share the same shape:
-
-```
-PERCEIVE (providers/state)  ->  DECIDE (LLM/HLP/FSM)  ->  ACT (actions/functions/tools)  ->  repeat
-```
-
-FORTRESS always attaches at the **ACT layer** as one of the agent's actions/tools, and underneath
-becomes the treasury + payment rail. So the integration surface is small and uniform:
-
-| Platform | Extension point FORTRESS plugs into | Deliverable |
-|----------|-------------------------------------|-------------|
-| ElizaOS | Action + Provider (plugin) | `@fortress/plugin` (TS) |
-| Virtuals GAME | Worker **Function** | GAME Function pack + ACP settlement |
-| Rig | `Tool` trait | Rust SDK |
-| ZerePy | Connection + Action | Python connection |
-| Olas | FSM state action | Treasury integration |
-
-Underneath all of them sits the **same FORTRESS MCP server + x402 client + Turnkey signing**. Build
-once; expose through these thin per-platform adapters.
-
-### Suggested priority
-1. **ElizaOS** — biggest developer base, cleanest plugin model.
-2. **Virtuals** — biggest commerce/$ flow; ACP already uses x402, so you slot in.
-3. **Rig** — your Rust-native fit, lowest engineering cost.
-4. **ZerePy / Olas** — broaden coverage (social + autonomous services).
-
-> Where to read for FORTRESS placement: the FORTRESS touchpoints above mark candidate spots; the
-> common answer is "the agent's action/tool layer + the treasury behind it." For agent-to-agent
-> commerce specifically, the **Virtuals ACP transaction phase** is the single richest place FORTRESS
-> can sit.
+### Suggested integration priority
+1. **ElizaOS** + **Claude/OpenAI (MCP)** — config-only, biggest reach.
+2. **Virtuals** — biggest money flow; ACP already uses x402.
+3. **Rig** — Rust-native, lowest build cost.
+4. **ZerePy / Olas** — broaden coverage.
