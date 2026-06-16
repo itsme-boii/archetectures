@@ -1,0 +1,342 @@
+\documentclass[10pt, letterpaper]{article}
+
+% Packages:
+\usepackage[
+    ignoreheadfoot,
+    top= 0.75 cm,
+    bottom=0.45 cm,
+    left=1 cm,
+    right=1 cm,
+    footskip=1.0 cm,
+]{geometry}
+
+\usepackage{titlesec}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage[dvipsnames]{xcolor}
+\definecolor{primaryColor}{RGB}{0, 0, 0}
+\usepackage{enumitem}
+\usepackage{fontawesome5}
+\usepackage{amsmath}
+\usepackage[
+    pdftitle={Tushar Khokhar},
+    pdfauthor={CV},
+    pdfcreator={TK},
+    colorlinks=true,
+    urlcolor=primaryColor
+]{hyperref}
+\usepackage[pscoord]{eso-pic}
+\usepackage{calc}
+\usepackage{bookmark}
+\usepackage{lastpage}
+\usepackage{changepage}
+\usepackage{paracol}
+\usepackage{ifthen}
+\usepackage{needspace}
+\usepackage{iftex}
+\usepackage{graphicx}
+
+% ATS / Unicode
+\ifPDFTeX
+    \input{glyphtounicode}
+    \pdfgentounicode=1
+    \usepackage[T1]{fontenc}
+    \usepackage[utf8]{inputenc}
+    \usepackage{lmodern}
+\fi
+
+\usepackage{charter}
+
+% -------- SPACING SETTINGS --------
+\raggedright
+\linespread{0.94} % slightly tighter global spacing
+
+\AtBeginEnvironment{adjustwidth}{\partopsep0pt}
+\pagestyle{empty}
+\setcounter{secnumdepth}{0}
+\setlength{\parindent}{0pt}
+\setlength{\topskip}{0pt}
+\setlength{\columnsep}{0.15cm}
+\pagenumbering{gobble}
+
+% SECTION TITLE FORMAT
+\titleformat{\section}{\needspace{4\baselineskip}\bfseries\large}{}{0pt}{}[\vspace{1pt}\titlerule]
+
+% REDUCED SECTION SPACING
+\titlespacing{\section}{
+    -1pt
+}{
+    0.18 cm
+}{
+    0.12 cm
+}
+
+% BULLET STYLE
+\renewcommand\labelitemi{$\vcenter{\hbox{\small$\bullet$}}$}
+
+% -------- TIGHT BULLET ENVIRONMENTS --------
+\newenvironment{highlights}{
+    \begin{itemize}[
+        topsep=0.05 cm,
+        parsep=0.05 cm,
+        partopsep=0pt,
+        itemsep=-1pt,
+        leftmargin=0 cm + 10pt
+    ]
+}{
+    \end{itemize}
+}
+
+\newenvironment{highlightsforbulletentries}{
+    \begin{itemize}[
+        topsep=0.05 cm,
+        parsep=0.05 cm,
+        partopsep=0pt,
+        itemsep=-1pt,
+        leftmargin=10pt
+    ]
+}{
+    \end{itemize}
+}
+
+% -------- ENTRY ENVIRONMENTS --------
+\newenvironment{onecolentry}{
+    \begin{adjustwidth}{0 cm + 0.00001 cm}{0 cm + 0.00001 cm}
+}{
+    \end{adjustwidth}
+}
+
+\newenvironment{twocolentry}[2][]{
+    \onecolentry
+    \def\secondColumn{#2}
+    \setcolumnwidth{\fill, 4.75 cm}
+    \begin{paracol}{2}
+}{
+    \switchcolumn \raggedleft \secondColumn
+    \end{paracol}
+    \endonecolentry
+}
+
+\newenvironment{twocolentry2}[2][]{
+    \onecolentry
+    \def\secondColumn{#2}
+    \setcolumnwidth{\fill, 3.5 cm}
+    \begin{paracol}{2}
+}{
+    \switchcolumn \raggedleft \secondColumn
+    \end{paracol}
+    \endonecolentry
+}
+
+% -------- HEADER (LEFT NAME | RIGHT CONTACTS) --------
+\newenvironment{header}{
+    \setlength{\topsep}{0pt}
+    \noindent
+    \begin{tabular*}{\textwidth}{@{}l@{\extracolsep{\fill}}r@{}}
+}{
+    \end{tabular*}
+    \par
+}
+
+
+\begin{document}
+
+\newcommand{\AND}{\unskip
+    \cleaders\copy\ANDbox\hskip\wd\ANDbox
+    \ignorespaces
+}
+\newsavebox\ANDbox
+\sbox\ANDbox{$|$}
+
+\begin{header}
+\fontsize{19 pt}{19 pt}\selectfont \textbf{Tushar Khokhar} &
+\small
+\href{https://linkedin.com/in/tushar-khokhar/}{
+      \raisebox{-0.15\height} \faLinkedin\ linkedin.com/in/tushar-khokhar} \\
+&
+\faEnvelope\enskip \href{mailto:tusharkhokhar.iit@gmail.com}{tusharkhokhar.iit@gmail.com} \\
+
+
+\end{header}
+
+\vspace{-0.2cm}
+
+\vspace{-0.15cm} % pulls content up slightly
+
+\small{
+      \section{Summary}
+    \vspace{5 pt -0.1 cm}
+
+           \textbf{Backend Engineer} with 3+ years building high-throughput, low-latency systems for \textbf{perpetuals, derivatives, and DeFi trading platforms}. Core stack \textbf{TypeScript/Node.js} with strong \textbf{Python} and \textbf{Rust}; experienced across real-time trading engines, \textbf{Web3/EVM} infrastructure, and event-driven distributed services shipped end to end in production.
+
+        \vspace{-0.005 cm}
+\vspace{-0.1 cm}
+
+
+\small{
+      \section{EDUCATION}
+    \vspace{5 pt -0.1 cm}
+
+        \begin{twocolentry}{
+            2022 - 26
+        }
+            \textbf{Indian Institute of Technology, Kharagpur}\end{twocolentry}
+
+        \vspace{0.05 cm}
+        \begin{twocolentry}{
+                    CGPA : 8.85/10
+                }
+            Bachelor of Technology in Ocean Engineering and Naval Architecture\end{twocolentry}
+        \vspace{-0.005 cm}
+\vspace{-0.1 cm}
+    }
+
+
+    \section{Experience}
+     \begin{twocolentry2}{
+    Feb '25 - Mar '26
+}
+    \textbf{Arcane Labs | Founding Backend Engineer | Full-time}\end{twocolentry2}
+\begin{onecolentry}
+    \textit{Founding engineer owning backend systems and infrastructure for trading and DeFi platforms end to end using Node.js, TypeScript, Python and Go}
+\end{onecolentry}
+\vspace{0.10 cm}
+\begin{onecolentry}
+    \textbf{\small Hundred Exchange} \small— Perpetuals \& Derivatives Trading Platform
+    \begin{highlights}
+        \item Built a low-latency \textbf{order matching engine (CLOB)} handling \textbf{1K–3K req/sec} across trading APIs and WebSocket streams
+        \item Engineered real-time \textbf{orderbook, margin, and liquidation services} with PostgreSQL and Redis locks, ensuring safe concurrent state transitions
+        \item Optimized the backend for high-frequency trading workloads, improving execution efficiency and reliability under peak load
+    \end{highlights}
+\end{onecolentry}
+\vspace{0.08 cm}
+\begin{onecolentry}
+    \textbf{\small Doma, Tide, Edel \& xTrends} \small— Auction, Market-Data \& DeFi Backends
+    \begin{highlights}
+        \item Built scalable \textbf{Node.js} backends supporting \textbf{500–1000 concurrent users}, with async pipelines using \textbf{BullMQ} workers, retries, and backoff for reliable blockchain processing
+        \item Designed \textbf{Redis caching and Pub/Sub} layers for low-latency, cross-exchange market-data aggregation, cutting API latency and stabilizing performance under peak traffic
+        \item Ensured \textbf{on-chain/off-chain consistency} via event-log parsing and reconciliation jobs, with idempotent, JWT-secured REST APIs
+    \end{highlights}
+\end{onecolentry}
+        \vspace{0.1 cm}
+
+         \begin{twocolentry2}{
+            Nov '24 - Jan '25
+        }
+            \textbf{{Mode Network | Backend \& Blockchain Engineer | Internship} }\end{twocolentry2}
+        \begin{onecolentry}
+           \textit{Built backend systems and smart-contract infrastructure for on-chain governance using Node.js and Solidity}\end{onecolentry}
+        \vspace{0.10 cm}
+        \begin{onecolentry}
+            \begin{highlights}
+               \item Built \textbf{backend services and Solidity contracts} managing an \textbf{\$8M+ treasury}, enabling secure on-chain governance
+               \item Reduced \textbf{gas costs by 35\%} via optimized contract design and Velodrome integration, improving capital efficiency
+                \item Delivered production-grade backend infrastructure that supported \textbf{strong post-launch growth}
+      \end{highlights}
+        \end{onecolentry}
+
+        \vspace{0.1 cm}
+   \begin{twocolentry2}{
+            Aug '24 - Oct '24
+        }
+            \textbf{{Eclipse Network | Backend \& Blockchain Engineer | Internship} }\end{twocolentry2}
+        \begin{onecolentry}
+           \textit{Built high-performance backend systems and smart contracts for digital asset transfers using Go and Solana} \end{onecolentry}
+        \vspace{0.10 cm}
+        \begin{onecolentry}
+            \begin{highlights}
+               \item Built \textbf{NFT trading backend services} handling \textbf{500K+ user operations} with scalable, reliable on-chain settlement
+               \item Developed \textbf{Solana escrow and settlement contracts} for secure, reliable digital-asset transactions
+\item Implemented \textbf{optimized database operations}, improving processing speed for large volumes in production
+      \end{highlights}
+        \end{onecolentry}
+
+        \vspace{0.1 cm}
+   \begin{twocolentry2}{
+            May '23 - Jul '24
+        }
+            \textbf{{zkAGI | Backend \& Systems Engineer | Full-time} }\end{twocolentry2}
+        \begin{onecolentry}
+           \textit{Built low-latency distributed systems and backend infrastructure for AI workloads}\end{onecolentry}
+        \vspace{0.10 cm}
+        \begin{onecolentry}
+            \begin{highlights}
+             \item Built a \textbf{distributed GPU orchestration platform in Rust}, enabling efficient resource management across compute systems
+            \item Designed a \textbf{low-latency P2P communication layer}, improving coordination across distributed applications
+              \item Managed \textbf{Docker and Kubernetes infrastructure}, ensuring high availability, fault tolerance, and scalable deployments
+      \end{highlights}
+        \end{onecolentry}
+
+\vspace{0.04cm}
+
+  \section{PROJECTS}
+
+                \begin{twocolentry2}{
+             Rust · Base
+        }
+            \textbf{Fortress | Treasury \& Payments Infra for AI Agents } \end{twocolentry2}
+        \begin{onecolentry}
+           \textit{Production-grade Rust backend providing non-custodial wallets, yield, and safe on-chain payments for AI agents on Base}\end{onecolentry}
+        \vspace{0.10 cm}
+        \begin{onecolentry}
+            \begin{highlights}
+                \item Built a reliable \textbf{transaction engine in Rust (Axum)} using a \textbf{write-ahead outbox + background workers}, guaranteeing idempotent, at-least-once on-chain execution
+              \item Engineered \textbf{safe concurrent transaction handling} via PostgreSQL nonce reservation and \textbf{pre-broadcast simulation}, preventing failed and duplicate transactions
+               \item Implemented \textbf{two-phase confirmation with reorg detection}, automatic retries, and immutable audit logs for fault tolerance and full observability
+               \item Integrated \textbf{Base (EVM) RPCs, on-chain event webhooks, secure (TEE) signing, and x402 stablecoin payments} behind a clean, reusable service layer
+            \end{highlights}
+        \end{onecolentry}
+
+        \vspace{0.1 cm}
+
+         \begin{twocolentry2}{
+            Rust
+        }
+            \textbf{{Real-Time Collaboration \& Messaging Platforms}}\end{twocolentry2}
+        \begin{onecolentry}
+            \textit{Built real-time collaborative editing and messaging systems with low-latency sync, conflict resolution, and secure auth}\end{onecolentry}
+        \vspace{0.10 cm}
+        \begin{onecolentry}
+            \begin{highlights}
+              \item Built a \textbf{high-concurrency system in Rust} using scalable, persistent WebSocket connections for real-time communication
+                \item Designed a \textbf{WebSocket + Redis Pub/Sub} layer for low-latency state sync and conflict resolution across clients
+                \item Implemented \textbf{JWT-based auth and async delivery}, ensuring secure handling and reliable message/state persistence
+      \end{highlights}
+        \end{onecolentry}
+
+\section{Competitions}
+
+\begin{twocolentry2}{
+    InterIIT Tech Meet 12.0
+} \textbf{Aptos Blockchain Challenge | Part of Gold-Winning Contingent} \end{twocolentry2}
+\begin{onecolentry}
+     \textit{Part of the gold-winning team, building smart contracts in Rust/Move for a governance-driven decentralized application}
+\end{onecolentry}
+\vspace{0.10 cm}
+\begin{onecolentry}
+    \begin{highlights}
+  \item Developed \textbf{Move-based smart contracts}, enabling decentralized governance and secure on-chain user interactions at scale
+     \item Designed \textbf{efficient, secure backend logic for blockchain interactions}, optimizing costs and ensuring fast execution
+  \item Authored \textbf{contract documentation and integration guides}, reducing onboarding time and accelerating developer adoption
+    \end{highlights}
+\end{onecolentry}
+
+
+    \section{Skills and Expertise}
+
+        \begin{onecolentry}
+
+\textbf{Languages:} TypeScript | Node.js | Python | Rust | Go | SQL | Solidity | Bash | C++
+
+\textbf{Backend \& Systems:} REST APIs | WebSockets | Event-driven Architecture | Microservices | Queues \& Workers (BullMQ) | Kafka | Caching | Distributed Systems | System Design | Observability | Testing
+
+\textbf{Databases:} PostgreSQL | MongoDB | Redis | MySQL | Schema Design | Query Optimization | Indexing
+
+\textbf{Web3:} EVM \& Base | Solana | Smart Contracts | Wallets | RPC Providers | Indexers \& Event Listeners | DeFi \& Perpetuals | Foundry | Hardhat | Web3.js
+
+\textbf{Infra \& DevOps:} Docker | Kubernetes | AWS | CI/CD | Linux
+
+        \end{onecolentry}
+
+
+\end{document}
