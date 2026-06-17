@@ -1,90 +1,365 @@
-# Prompt-to-DeFi Agent
+# Design Document: Prompt-to-DeFi Agent
 
-Natural-language → simulated → executable DeFi strategies. Describe a goal in plain
-English; an LLM turns it into a structured plan; deterministic code builds the
-transactions; Tenderly simulates them; the user signs from their own wallet.
+## Overview
 
-**Non-custodial. Simulate-first. Plugin-based.** The agent decides *what* to do; it
-never holds keys and never hand-rolls calldata at execution time.
+The Prompt-to-DeFi Agent is a backend pipeline that transforms natural-language DeFi prompts into simulated, executable transaction plans. The system follows a strict two-phase lifecycle: Plan & Simulate (no signature required) and Confirm & Execute (user signs). The architecture enforces non-custodial operation, deterministic transaction building, and plugin-based protocol extensibility.
 
----
+Phase 0a targets Base mainnet (8453) in simulation-only mode via Tenderly fork, supporting Morpho (lend, supplyBorrow, multiply), LiFi (swap), and an Aave extensibility stub.
 
-## 1. Core principles
+Key design decisions:
+- **LLM as untrusted selector**: The Planner only selects tools and fills params. All calldata is built by deterministic code.
+- **Plugin boundary**: Tools depend on core interfaces; core never imports tools. This enables protocol additions without core changes.
+- **SDK isolation**: All external SDK calls are wrapped in typed adapters under `src/protocols/` and `src/simulators/`, preventing version churn from reaching the pipeline.
+- **Simulation-first**: Every plan passes through Tenderly fork simulation before artifacts reach the user.
 
-These are non-negotiable and shape every design decision below.
+## Architecture
 
-| Principle | What it means in practice |
-| --- | --- |
-| **Non-custodial** | Backend builds *unsigned* transactions. Only the user's wallet signs. Keys never touch the server. |
-| **Simulate-first** | Every plan is simulated (Tenderly for EVM, venue API for non-EVM) before anything is signed. Failures are caught before money moves. |
-| **Deterministic execution** | The LLM only *selects tools and fills typed params*. All calldata is built by deterministic code — no AI in the execution path (eliminates hallucination at the money layer). |
-| **Confirm gate** | A hard boundary between "simulated" and "executed". Two separate endpoints: `/plan` (+`/simulate`) and `/execute`. |
-| **Plugin-per-protocol** | Every protocol action implements one `Tool` contract. Adding Aave/Uniswap/Hyperliquid is a drop-in plugin — core code never changes (Open/Closed). |
-| **Execution-kind agnostic** | Tools produce *artifacts*, not "transactions". EVM calldata and non-EVM signed actions (e.g. Hyperliquid) coexist behind the same interface. |
+```mermaid
+graph TD
+    A[User Prompt] --> B[Fastify API /plan]
+    B --> C[Planner - OpenAI GPT-4o]
+    C --> D[Pipeline Orchestrator]
+    D --> E[Resolver Stage]
+    E --> F[Validator Stage]
+    F --> G[Tx Builder Stage]
+    G --> H[Sim Router]
+    H --> I[Tenderly Simulator]
+    I --> J[Preview Response]
+    
+    J -->|User Confirms| K[/execute endpoint]
+    K --> L[Executor]
+    L --> M[Unsigned Artifacts → Wallet Signs]
 
----
+    subgraph Core Pipeline
+        D
+        E
+        F
+        G
+    end
 
-## 2. Architecture
+    subgraph Simulators
+        H
+        I
+    end
 
+    subgraph Tools - Plugins
+        T1[morpho.lend]
+        T2[morpho.supplyBorrow]
+        T3[morpho.multiply]
+        T4[lifi.swap]
+        T5[aave.supply stub]
+    end
+
+    subgraph Protocol Adapters
+        PA1[Morpho Adapter]
+        PA2[LiFi Adapter]
+        PA3[Tenderly Adapter]
+    end
 ```
-USER PROMPT
-   │
-   ▼
-┌──────────────┐
-│ Planner (LLM)│  OpenAI function-calling → structured Plan (ordered tool calls + args)
-└──────┬───────┘
-       ▼
-┌──────────────┐
-│  Resolver    │  discovery: best-APY vault, swap/bridge routes, names → addresses
-└──────┬───────┘
-       ▼
-┌──────────────┐
-│  Validator   │  LTV / health-factor math, balances, slippage bounds — rejects bad plans early
-└──────┬───────┘
-       ▼
-┌──────────────┐
-│  Tx Builder  │  per-tool build() → ExecutionArtifact[]  (EVM bundle, EVM tx, or signed action)
-└──────┬───────┘
-       ▼
-┌──────────────┐
-│ Sim Router   │  dispatches each artifact to the correct simulator, merges into ONE preview
-└──────┬───────┘
-       ▼
-   PREVIEW CARD  ── user reviews ──► [ Confirm ]
-       ▼
-┌──────────────┐
-│  Executor    │  hands unsigned tx → WALLET SIGNS → broadcast; polls status between cross-chain legs
-└──────────────┘
+
+### Request Flow
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API as Fastify API
+    participant Planner
+    participant Registry as Tool Registry
+    participant Pipeline
+    participant Resolver
+    participant Validator
+    participant TxBuilder as Tx Builder
+    participant SimRouter as Sim Router
+    participant Tenderly
+    participant Store as Plan Store
+
+    Client->>API: POST /plan { prompt, walletAddress, chainId }
+    API->>Planner: interpret(prompt, toolSchemas)
+    Planner->>Registry: getSchemas(chainId)
+    Registry-->>Planner: filtered function schemas
+    Planner-->>API: Plan { steps: ToolCall[] }
+    API->>Pipeline: execute(plan, ctx)
+    Pipeline->>Resolver: resolve(toolCalls, ctx)
+    Resolver-->>Pipeline: resolvedArgs
+    Pipeline->>Validator: validate(resolvedArgs, ctx)
+    Validator-->>Pipeline: ok
+    Pipeline->>TxBuilder: build(resolvedArgs, ctx)
+    TxBuilder-->>Pipeline: ExecutionArtifact[]
+    Pipeline->>SimRouter: simulate(artifacts, ctx)
+    SimRouter->>Tenderly: bundle simulation (impersonate wallet)
+    Tenderly-->>SimRouter: SimResult
+    SimRouter-->>Pipeline: Preview
+    Pipeline-->>API: Preview
+    API->>Store: store(planId, planData, ttl=15min)
+    API-->>Client: Preview response
 ```
 
-### The two-phase lifecycle
+## Components and Interfaces
 
-**Phase 1 — Plan & Simulate (no signature):**
-1. `POST /plan` with `{ prompt, walletAddress, chainId }`.
-2. Planner extracts a `Plan` (ordered `ToolCall[]`).
-3. Resolver fills concrete addresses / routes / discovery.
-4. Validator checks balances + LTV math, rejects impossible plans.
-5. Tx Builder produces `ExecutionArtifact[]`.
-6. Sim Router simulates (impersonating the user — no signature needed on a fork) and returns a `Preview`.
+### Core Layer (`src/core/`)
 
-**Phase 2 — Confirm & Execute (user signs):**
-7. User clicks Confirm → `POST /execute`.
-8. Backend returns the unsigned artifact(s); the wallet signs and broadcasts.
-9. Same-chain bundled actions = **1 signature**. Cross-chain = a guided sequence; the executor polls bridge status before handing over the next leg.
+The core layer defines interfaces and orchestration. It has zero dependencies on external SDKs or protocol implementations.
 
----
-
-## 3. Core contracts
-
-The entire extensibility model rests on two interfaces. **Core depends on these
-interfaces — never on a concrete protocol.**
+#### Tool Interface
 
 ```ts
-// core/tool.ts
+// src/core/tool.ts
+import { ZodSchema } from "zod";
 
 export type Capability =
   | "LEND" | "BORROW" | "SUPPLY_COLLATERAL" | "MULTIPLY"
   | "SWAP" | "BRIDGE" | "LP" | "PERP" | "STAKE";
+
+export interface Tool<TArgs = unknown, TResolved = TArgs> {
+  readonly id: string;
+  readonly capability: Capability;
+  readonly chains: number[];
+  readonly description: string;
+  readonly paramSchema: ZodSchema<TArgs>;
+
+  resolve(args: TArgs, ctx: PipelineContext): Promise<TResolved>;
+  validate(resolved: TResolved, ctx: PipelineContext): Promise<void>;
+  build(resolved: TResolved, ctx: PipelineContext): Promise<ExecutionArtifact[]>;
+  preview(resolved: TResolved, sim: SimResult): PreviewCard;
+}
+```
+
+#### Tool Registry
+
+```ts
+// src/core/registry.ts
+export interface ToolRegistry {
+  register(tool: Tool): void;
+  get(toolId: string): Tool;
+  getForChain(chainId: number): Tool[];
+  toOpenAIFunctions(chainId: number): OpenAIFunctionSchema[];
+}
+```
+
+- `register()` throws on duplicate IDs.
+- `toOpenAIFunctions()` converts each tool's `paramSchema` to an OpenAI function schema via `zod-to-json-schema`, filtered by chain.
+
+#### Pipeline Orchestrator
+
+```ts
+// src/core/pipeline.ts
+export interface PipelineResult {
+  preview: Preview;
+  artifacts: ExecutionArtifact[];
+}
+
+export async function executePipeline(
+  plan: Plan,
+  ctx: PipelineContext,
+  registry: ToolRegistry,
+  simRouter: SimulationRouter
+): Promise<PipelineResult>;
+```
+
+The orchestrator runs stages sequentially: resolve → validate → build → simulate. It fails fast on the first error at any stage.
+
+#### Pipeline Context
+
+```ts
+// src/core/context.ts
+import type { PublicClient } from "viem";
+
+export interface PipelineContext {
+  readonly walletAddress: `0x${string}`;
+  readonly chainId: number;
+  readonly client: PublicClient;
+  readonly blockNumber: bigint;
+}
+```
+
+### Agents Layer (`src/agents/`)
+
+#### Planner
+
+```ts
+// src/agents/planner/index.ts
+export interface PlannerConfig {
+  model: string;         // "gpt-4o"
+  temperature: 0;
+  maxSteps: 10;
+}
+
+export interface Planner {
+  interpret(
+    prompt: string,
+    toolSchemas: OpenAIFunctionSchema[],
+    chainId: number
+  ): Promise<Plan>;
+}
+```
+
+Uses OpenAI function-calling. The response is parsed into `ToolCall[]` and each call's args are validated against the tool's `paramSchema`.
+
+#### Executor
+
+```ts
+// src/agents/executor/index.ts
+export interface ExecutionResponse {
+  artifacts: ExecutionArtifact[];
+  order: string[];  // artifact IDs in signing order (approvals first)
+}
+
+export interface Executor {
+  prepare(planId: string): Promise<ExecutionResponse>;
+}
+```
+
+Returns unsigned artifacts ordered for sequential wallet signing. Phase 0 is simulation-only; broadcast is disabled.
+
+### Simulators Layer (`src/simulators/`)
+
+#### Simulator Interface
+
+```ts
+// src/simulators/types.ts
+export interface Simulator {
+  supports(kind: ExecutionArtifact["kind"]): boolean;
+  simulate(artifacts: ExecutionArtifact[], ctx: PipelineContext): Promise<SimResult>;
+}
+```
+
+#### Simulation Router
+
+```ts
+// src/simulators/router.ts
+export interface SimulationRouter {
+  register(simulator: Simulator): void;
+  simulate(artifacts: ExecutionArtifact[], ctx: PipelineContext): Promise<SimResult>;
+}
+```
+
+The router groups artifacts by kind, dispatches to the matching simulator, and merges results. For Phase 0, only the Tenderly simulator is registered (supports: evmTx, evmBundle, approval).
+
+#### Tenderly Adapter
+
+```ts
+// src/simulators/tenderly.ts
+export interface TenderlyConfig {
+  accessKey: string;
+  accountSlug: string;
+  projectSlug: string;
+  timeoutMs: 30_000;
+}
+
+export interface TenderlyBundleRequest {
+  networkId: string;
+  blockNumber: number;
+  from: string;
+  transactions: TenderlyTx[];
+  simulationType: "full";
+  stateObjects?: Record<string, unknown>;
+}
+
+export interface TenderlySimulator extends Simulator {
+  supports(kind: ExecutionArtifact["kind"]): boolean;  // evmTx | evmBundle | approval
+  simulate(artifacts: ExecutionArtifact[], ctx: PipelineContext): Promise<SimResult>;
+}
+```
+
+### Protocol Adapters (`src/protocols/`)
+
+#### Morpho Adapter
+
+```ts
+// src/protocols/morpho.ts
+export interface MorphoVault {
+  address: `0x${string}`;
+  asset: `0x${string}`;
+  supplyApy: number;
+  totalSupply: bigint;
+  chainId: number;
+}
+
+export interface MorphoMarket {
+  id: string;
+  collateralAsset: `0x${string}`;
+  borrowAsset: `0x${string}`;
+  lltv: bigint;
+  chainId: number;
+}
+
+export interface MorphoAdapter {
+  getVaults(asset: `0x${string}`, chainId: number): Promise<MorphoVault[]>;
+  getMarket(marketId: string, chainId: number): Promise<MorphoMarket>;
+  getPosition(marketId: string, user: `0x${string}`): Promise<MorphoPosition>;
+  buildSupplyBundle(params: SupplyBundleParams): Promise<`0x${string}`>;
+  buildSupplyBorrowBundle(params: SupplyBorrowBundleParams): Promise<`0x${string}`>;
+  buildMultiplyBundle(params: MultiplyBundleParams): Promise<`0x${string}`>;
+}
+```
+
+Wraps `@morpho-org/blue-api-sdk` for GraphQL queries and `@morpho-org/bundler-sdk-viem` for bundle construction.
+
+#### LiFi Adapter
+
+```ts
+// src/protocols/lifi.ts
+export interface SwapRoute {
+  fromToken: `0x${string}`;
+  toToken: `0x${string}`;
+  fromAmount: bigint;
+  toAmount: bigint;
+  slippage: number;
+  approvalAddress: `0x${string}`;
+  txData: `0x${string}`;
+  txTo: `0x${string}`;
+  txValue: bigint;
+}
+
+export interface LiFiAdapter {
+  getSwapRoutes(params: SwapQuoteParams): Promise<SwapRoute[]>;
+  getBestRoute(params: SwapQuoteParams): Promise<SwapRoute>;
+  getSwapCalldata(route: SwapRoute): Promise<{ to: `0x${string}`; data: `0x${string}`; value: bigint }>;
+}
+```
+
+Wraps `@lifi/sdk` for route queries and calldata construction.
+
+### API Layer (`src/api/`)
+
+```ts
+// src/api/routes.ts
+// POST /plan   → PlanRequestSchema → Preview
+// POST /simulate → SimulateRequestSchema → Preview
+// POST /execute → ExecuteRequestSchema → ExecutionResponse
+```
+
+Built on Fastify with Zod request validation, structured error responses, and IP-based rate limiting (60 req/min/IP).
+
+### Plan Store (`src/core/store.ts`)
+
+```ts
+export interface StoredPlan {
+  planId: string;
+  prompt: string;
+  walletAddress: `0x${string}`;
+  chainId: number;
+  resolvedCalls: ResolvedToolCall[];
+  artifacts: ExecutionArtifact[];
+  preview: Preview;
+  createdAt: number;
+}
+
+export interface PlanStore {
+  set(planId: string, data: StoredPlan): void;
+  get(planId: string): StoredPlan | null;  // returns null if expired
+  delete(planId: string): void;
+}
+```
+
+In-memory Map with 15-minute TTL. A periodic cleanup interval evicts expired entries.
+
+## Data Models
+
+### Core Types
+
+```ts
+// src/core/types.ts
 
 export type UnsignedTx = {
   to: `0x${string}`;
@@ -93,253 +368,378 @@ export type UnsignedTx = {
   chainId: number;
 };
 
-// build() returns these. Discriminated union keeps the system open to new execution kinds.
 export type ExecutionArtifact =
-  | { kind: "approval";     chainId: number; tx: UnsignedTx }
-  | { kind: "evmTx";        chainId: number; tx: UnsignedTx }            // single contract call (Aave, Compound, Uniswap)
-  | { kind: "evmBundle";    chainId: number; tx: UnsignedTx }           // atomic multi-action (Morpho bundler)
-  | { kind: "signedAction"; venue: string;   typedData: unknown };      // non-EVM (Hyperliquid): sign + POST
-
-// Every protocol action implements THIS. Nothing in core knows about Morpho/Aave/etc.
-export interface Tool<TArgs, TResolved = TArgs> {
-  id: string;                  // "morpho.lend", "aave.supply", "hyperliquid.openPerp"
-  capability: Capability;
-  chains: number[];
-  description: string;         // helps the planner choose
-  paramSchema: ZodSchema<TArgs>;
-
-  resolve(args: TArgs, ctx: Ctx): Promise<TResolved>;          // discovery, names → addresses, quotes
-  validate(args: TResolved, ctx: Ctx): Promise<void>;         // LTV/health/balance/slippage — throw on failure
-  build(args: TResolved, ctx: Ctx): Promise<ExecutionArtifact[]>;
-  preview(args: TResolved, sim: SimResult): PreviewCard;      // human-readable summary
-}
-```
-
-```ts
-// simulators/router.ts
-
-export interface Simulator {
-  supports(kind: ExecutionArtifact["kind"]): boolean;
-  simulate(artifacts: ExecutionArtifact[], ctx: Ctx): Promise<SimResult>;
-}
-
-// Registered simulators:
-//   TenderlySimulator    → evmTx | evmBundle | approval  (fork + impersonate + state diff)
-//   HyperliquidSimulator → signedAction                  (analytical: fill/margin/liq from venue API)
-//   CrossChainSimulator  → splits a multi-chain plan, simulates each leg, stitches results
-//
-// SimulationRouter.route():
-//   1. group artifacts by (simulator, chain)
-//   2. EVM same-chain  → ONE Tenderly bundle (step 2 sees step 1's state)
-//   3. cross-chain     → per-leg sims
-//   4. non-EVM venues  → venue simulator
-//   5. merge into a single Preview
-```
-
-```ts
-// core/types.ts
+  | { kind: "approval";  chainId: number; tx: UnsignedTx; tokenAddress: `0x${string}`; spender: `0x${string}`; amount: bigint }
+  | { kind: "evmTx";     chainId: number; tx: UnsignedTx }
+  | { kind: "evmBundle";  chainId: number; tx: UnsignedTx }
+  | { kind: "signedAction"; venue: string; typedData: unknown };
 
 export type Plan = {
   planId: string;
   chainId: number;
   walletAddress: `0x${string}`;
-  steps: ToolCall[];                 // ordered
+  steps: ToolCall[];
 };
 
-export type ToolCall = { tool: string; args: unknown };  // args validated against the tool's paramSchema
+export type ToolCall = {
+  toolId: string;
+  args: unknown;
+};
+
+export type ResolvedToolCall = {
+  toolId: string;
+  args: unknown;
+  resolved: unknown;
+};
+
+export type SimResult = {
+  success: boolean;
+  revertReason?: string;
+  revertIndex?: number;
+  gasUsed: bigint;
+  gasCostNative: bigint;
+  balanceChanges: BalanceChange[];
+  positionAfter?: PositionState;
+  rawLogs: unknown[];
+};
+
+export type BalanceChange = {
+  token: string;        // symbol
+  tokenAddress: `0x${string}`;
+  before: bigint;
+  after: bigint;
+};
+
+export type PositionState = {
+  collateral: bigint;
+  debt: bigint;
+  ltv: number;          // percentage 0-100
+  lltv: number;         // percentage 0-100
+};
+
+export type PreviewCard = {
+  summary: string;      // max 2 sentences
+  balanceChanges: BalanceChange[];
+  gasEstimate: { gasUnits: bigint; nativeCost: bigint };
+  position?: PositionState;
+};
 
 export type Preview = {
   planId: string;
   humanSummary: string;
-  resolved: Record<string, unknown>; // concrete choices, shown for transparency
-  simulation: {
-    success: boolean;
-    revertReason?: string;
-    gasEstimate?: string;
-    balanceChanges: { token: string; before: string; after: string }[];
-    positionAfter?: { collateral: string; debt: string; ltv: number; lltv: number };
-  };
-  artifacts: ExecutionArtifact[];    // signed in Phase 2
+  simulation: SimResult;
+  artifacts: ExecutionArtifact[];
+  previewCards: PreviewCard[];
 };
 ```
 
----
+### API Request/Response Schemas
 
-## 4. Project structure
+```ts
+// src/api/schemas.ts
+import { z } from "zod";
+
+export const PlanRequestSchema = z.object({
+  prompt: z.string().min(1).max(2000),
+  walletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  chainId: z.number().int().positive(),
+});
+
+export const SimulateRequestSchema = z.object({
+  planId: z.string().uuid(),
+});
+
+export const ExecuteRequestSchema = z.object({
+  planId: z.string().uuid(),
+});
+
+export const ErrorResponseSchema = z.object({
+  error: z.object({
+    stage: z.enum(["planner", "resolver", "validator", "builder", "simulator", "api"]),
+    category: z.enum(["validation", "resolution", "build", "simulation", "timeout", "unknown"]),
+    message: z.string(),
+    details: z.record(z.unknown()).optional(),
+  }),
+});
+```
+
+### Pipeline Error Model
+
+```ts
+// src/core/errors.ts
+export type PipelineStage = "planner" | "resolver" | "validator" | "builder" | "simulator";
+export type ErrorCategory = "validation" | "resolution" | "build" | "simulation" | "timeout" | "unknown";
+
+export class PipelineError extends Error {
+  constructor(
+    public readonly stage: PipelineStage,
+    public readonly category: ErrorCategory,
+    message: string,
+    public readonly details?: Record<string, unknown>
+  ) {
+    super(message);
+  }
+}
+```
+
+### Permit2 / EIP-2612 Approval Folding
+
+The Tx Builder implements a token approval strategy:
+
+1. Check if the token implements EIP-2612 `permit()` by reading `DOMAIN_SEPARATOR` and `nonces`.
+2. If EIP-2612 is supported: fold the permit into the bundle's calldata (e.g., Morpho bundler's `permit` action) — single signature.
+3. If Permit2 is deployed and the token is approved to Permit2: use Permit2 `permitTransferFrom` — single signature.
+4. Fallback: emit a separate `{ kind: "approval" }` artifact requiring an additional signature.
+
+```mermaid
+flowchart TD
+    A[Token needs approval] --> B{EIP-2612 permit?}
+    B -->|Yes| C[Fold permit into bundle - 1 sig]
+    B -->|No| D{Permit2 available?}
+    D -->|Yes| E[Use Permit2 permitTransferFrom - 1 sig]
+    D -->|No| F[Separate approval artifact - 2 sigs]
+```
+
+## Correctness Properties
+
+*A property is a characteristic or behavior that should hold true across all valid executions of a system — essentially, a formal statement about what the system should do. Properties serve as the bridge between human-readable specifications and machine-verifiable correctness guarantees.*
+
+### Property 1: Plan schema validation
+
+*For any* ToolCall with arguments, if the arguments conform to the tool's Zod paramSchema then validation succeeds; if the arguments violate the schema then validation rejects with an error identifying the invalid fields and violated constraints.
+
+**Validates: Requirements 1.1, 1.2, 1.4**
+
+### Property 2: Registry chain filtering
+
+*For any* set of registered Tools and any chain ID, the Tool_Registry SHALL return only tools whose `chains` array contains that chain ID; if no tools match, the system rejects with an appropriate error; if a ToolCall references an unregistered tool ID, the system rejects.
+
+**Validates: Requirements 1.3, 1.6, 8.3, 8.6**
+
+### Property 3: Vault selection maximizes APY with TVL tiebreaker
+
+*For any* non-empty list of MorphoVault objects matching a given asset and chain, the selection function SHALL return the vault with the highest `supplyApy`; if multiple vaults share the same highest APY, the one with the highest `totalSupply` is selected.
+
+**Validates: Requirements 2.2**
+
+### Property 4: Route selection maximizes output amount
+
+*For any* non-empty list of SwapRoute objects, the selection function SHALL return the route with the highest `toAmount`; if the user-specified slippage is undefined, the resolved route SHALL have slippage set to 0.005 (0.5%).
+
+**Validates: Requirements 2.3**
+
+### Property 5: Cumulative balance validation
+
+*For any* ordered sequence of ToolCalls where each step consumes a token amount, the Validator SHALL track cumulative consumption across steps such that the effective available balance for step N equals the wallet balance minus the sum of amounts consumed by steps 1 through N-1; if the effective balance is insufficient, the plan is rejected.
+
+**Validates: Requirements 3.1, 3.3**
+
+### Property 6: LTV rejection
+
+*For any* collateral value, debt value, and market LLTV, if `(debt / collateral) > LLTV` then the Validator SHALL reject the plan. If `(debt / collateral) <= LLTV` the plan passes the LTV check.
+
+**Validates: Requirements 3.2, 9.6**
+
+### Property 7: Slippage bound enforcement
+
+*For any* swap operation with a specified slippage value, if `slippage > 0.05` (5%) then the Validator SHALL reject the plan regardless of other parameters.
+
+**Validates: Requirements 3.4, 10.3**
+
+### Property 8: Validator fail-fast
+
+*For any* plan containing multiple constraint violations at different steps, the Validator SHALL report only the first violation encountered (lowest step index) and halt further validation.
+
+**Validates: Requirements 3.5**
+
+### Property 9: Artifact order preservation
+
+*For any* ordered sequence of ToolCalls, the Tx_Builder SHALL produce ExecutionArtifacts in the same sequence — the artifact at index i corresponds to the ToolCall at index i (accounting for inserted approval artifacts).
+
+**Validates: Requirements 4.1**
+
+### Property 10: Approval folding strategy
+
+*For any* token requiring spending allowance: if the token supports EIP-2612 permit or Permit2, the build output SHALL contain no separate "approval" artifact (the permit is folded into the bundle); if the token does not support permit/Permit2, the build output SHALL contain an "approval" artifact immediately preceding the spending artifact with the exact required amount.
+
+**Validates: Requirements 4.4, 4.5, 7.1, 7.3**
+
+### Property 11: Same-chain artifact grouping
+
+*For any* list of ExecutionArtifacts, the Sim_Router SHALL group all artifacts sharing the same chainId into a single simulation bundle, such that the number of distinct simulation calls equals the number of distinct chainIds in the input.
+
+**Validates: Requirements 5.1**
+
+### Property 12: Bundle revert propagation
+
+*For any* simulated bundle where at least one transaction reverts, the SimResult SHALL have `success: false`, SHALL contain the `revertReason`, and SHALL identify the `revertIndex` of the first failing transaction.
+
+**Validates: Requirements 5.4**
+
+### Property 13: Flashloan amount computation
+
+*For any* target leverage multiplier M, collateral amount C, and collateral/debt price ratio P, the morpho.multiply tool SHALL compute the flashloan amount such that the resulting position has effective leverage equal to M (within rounding tolerance), where `leverage = totalCollateral / (totalCollateral - totalDebt)`.
+
+**Validates: Requirements 9.3**
+
+### Property 14: Duplicate tool registration rejection
+
+*For any* Tool_Registry state, if a tool with ID X is already registered and a new tool with the same ID X is registered, the registry SHALL throw an error and the registry state SHALL remain unchanged.
+
+**Validates: Requirements 8.2**
+
+### Property 15: Plan store round-trip with TTL
+
+*For any* StoredPlan written to the PlanStore, retrieving by planId before TTL expiry SHALL return the identical data (prompt, walletAddress, chainId, resolvedCalls, artifacts); retrieving after TTL expiry SHALL return null.
+
+**Validates: Requirements 15.1, 15.2, 15.3, 15.4, 11.7**
+
+### Property 16: Structured error responses
+
+*For any* PipelineError thrown at any stage, the system's error response SHALL contain the `stage` field matching the failing stage, a `category` field, and a non-empty `message` string; no partial results from prior successful stages SHALL appear in the response.
+
+**Validates: Requirements 13.1, 13.5**
+
+### Property 17: Revert reason parsing
+
+*For any* Tenderly simulation response containing a revert reason (hex-encoded or string), the parser SHALL extract a non-empty human-readable string from it; if the revert reason cannot be decoded, the parser SHALL return the raw hex string as the message.
+
+**Validates: Requirements 13.2**
+
+## Error Handling
+
+### Strategy
+
+The system uses a **fail-fast, no-retry** error model. Each pipeline stage either succeeds and passes results forward or throws a `PipelineError` that halts the pipeline immediately.
+
+### Error Flow
+
+```mermaid
+flowchart LR
+    A[Pipeline Stage] -->|throws PipelineError| B[Pipeline Orchestrator]
+    B --> C[Discard intermediate results]
+    C --> D[Build structured error response]
+    D --> E[Return to API layer]
+    E --> F[Fastify error handler → JSON response]
+```
+
+### Error Categories by Stage
+
+| Stage | Possible Categories | Examples |
+|-------|-------------------|----------|
+| Planner | validation | Uninterpretable prompt, no function call produced |
+| Resolver | resolution, timeout | No vault found, LiFi timeout, unknown token |
+| Validator | validation | LTV exceeded, insufficient balance, slippage > 5% |
+| Builder | build | Bundler SDK failure, permit detection failure |
+| Simulator | simulation, timeout | Tenderly revert, simulation timeout (30s) |
+| API | validation | Invalid request body (Zod), missing planId (404) |
+
+### HTTP Status Mapping
+
+| Condition | Status |
+|-----------|--------|
+| Request body validation failure | 400 |
+| Plan not found / expired | 404 |
+| Rate limit exceeded | 429 |
+| Pipeline error (any stage) | 422 |
+| Unexpected server error | 500 |
+
+### Timeout Configuration
+
+| External Service | Timeout | Behavior on Timeout |
+|-----------------|---------|---------------------|
+| OpenAI (Planner) | 30s | PipelineError(planner, timeout) |
+| Morpho GraphQL | 10s | PipelineError(resolver, timeout) |
+| LiFi API | 10s | PipelineError(resolver, timeout) |
+| Tenderly Bundle API | 30s | PipelineError(simulator, timeout) |
+
+## Testing Strategy
+
+### Dual Testing Approach
+
+The system uses both property-based tests and example-based unit tests for comprehensive coverage.
+
+**Property-Based Tests** (using [fast-check](https://github.com/dubzzz/fast-check)):
+- Verify universal correctness properties across generated inputs
+- Minimum 100 iterations per property
+- Each test tagged with: `Feature: prompt-to-defi-agent, Property {N}: {title}`
+- Focus areas: validation logic, selection algorithms, ordering invariants, state management, error handling
+
+**Example-Based Unit Tests** (using vitest):
+- Specific integration scenarios (tool → adapter → mock response)
+- Edge cases: empty vault lists, zero balances, max slippage boundary
+- Error paths: network timeouts, revert decoding, invalid tool IDs
+- Morpho bundler flow (supplyBorrow, multiply)
+
+**Integration Tests**:
+- Fastify endpoint tests with supertest
+- Full pipeline with mocked protocol adapters
+- Rate limiting verification
+- Plan TTL lifecycle
+
+### Test Configuration
+
+```ts
+// vitest.config.ts
+export default defineConfig({
+  test: {
+    globals: true,
+    environment: "node",
+    testTimeout: 30_000,
+    coverage: { provider: "v8", thresholds: { lines: 80 } },
+  },
+});
+```
+
+### Property Test Structure
+
+```ts
+import { fc } from "@fast-check/vitest";
+
+// Feature: prompt-to-defi-agent, Property 6: LTV rejection
+describe("Validator LTV check", () => {
+  it.prop([fc.bigInt(1n, 10n**18n), fc.bigInt(1n, 10n**18n), fc.bigInt(1n, 10n**18n)])(
+    "rejects when debt/collateral exceeds LLTV",
+    (collateral, debt, lltv) => {
+      // ... test implementation
+    }
+  );
+});
+```
+
+### What Is NOT Property-Tested
+
+- Frontend components (React rendering, wagmi interactions) → snapshot + component tests
+- External SDK behavior (Morpho bundler output, LiFi route format) → integration tests with mocked adapters
+- Tenderly API contract → integration test with recorded fixtures
+- Rate limiting timing → integration test
+
+### Test File Organization
 
 ```
-src/
-  core/
-    tool.ts            # Tool interface, Capability, ExecutionArtifact
-    registry.ts        # ToolRegistry: register + chain-filtered OpenAI function schemas
-    pipeline.ts        # resolve → validate → build → simulate orchestration
-    context.ts         # Ctx: wallet, chainId, viem clients, data backbone
-    types.ts           # Plan, ToolCall, Preview, SimResult, PreviewCard
-  agents/
-    planner/           # OpenAI client, zodToOpenAIFunction, system prompt
-    resolver/          # discovery: best APY, routes, market lookup
-    validator/         # shared risk/LTV math
-    executor/          # signature orchestration + cross-chain status polling
-  simulators/
-    tenderly.ts
-    hyperliquid.ts
-    crosschain.ts
-    router.ts
-  tools/               # ◄── every protocol is a self-contained plugin
-    morpho/   lend.ts  supplyBorrow.ts  multiply.ts
-    lifi/     swap.ts  bridge.ts
-    aave/                # future
-    uniswap/             # future
-    compound/            # future
-    hyperliquid/         # future
-  protocols/           # thin SDK adapters (pin versions, isolate churn)
-  api/                 # /plan, /simulate, /execute (Fastify)
-  config/              # chains, RPCs, env loading
-  index.ts
 test/
-.env.example
-package.json
-tsconfig.json
+  properties/
+    validation.prop.test.ts     # Properties 1, 5, 6, 7, 8
+    registry.prop.test.ts       # Properties 2, 14
+    selection.prop.test.ts      # Properties 3, 4
+    builder.prop.test.ts        # Properties 9, 10
+    simulator.prop.test.ts      # Properties 11, 12
+    multiply.prop.test.ts       # Property 13
+    store.prop.test.ts          # Property 15
+    errors.prop.test.ts         # Properties 16, 17
+  unit/
+    planner.test.ts
+    morpho-lend.test.ts
+    morpho-supply-borrow.test.ts
+    morpho-multiply.test.ts
+    lifi-swap.test.ts
+    aave-stub.test.ts
+    permit-detection.test.ts
+  integration/
+    api-plan.test.ts
+    api-simulate.test.ts
+    api-execute.test.ts
+    pipeline-e2e.test.ts
+    rate-limit.test.ts
 ```
 
----
-
-## 5. Tech stack
-
-| Concern | Choice |
-| --- | --- |
-| Runtime | Node 20+, TypeScript (strict) |
-| Chain I/O | `viem` |
-| Morpho | `@morpho-org/blue-api-sdk`, `@morpho-org/blue-sdk(-viem)`, `@morpho-org/bundler-sdk-viem` |
-| Swaps / bridges | `@lifi/sdk` |
-| LLM | OpenAI (function-calling) + `zod` tool schemas |
-| Simulation | Tenderly Simulation API (EVM); venue APIs for non-EVM |
-| API | Fastify |
-| Validation | `zod` |
-
-> SDK method names drift between versions. Pin versions and wrap each SDK in a thin
-> adapter under `protocols/` so version churn stays isolated from the pipeline.
-
----
-
-## 6. Getting started
-
-### Prerequisites
-- Node 20+
-- Tenderly account (API key + account/project slug)
-- OpenAI API key
-- RPC URLs for target chains (Base Sepolia for the MVP)
-
-### Setup
-```bash
-npm install
-cp .env.example .env   # fill in keys
-npm run dev
-```
-
-### Environment variables (`.env.example`)
-```bash
-OPENAI_API_KEY=
-OPENAI_MODEL=gpt-4o
-
-TENDERLY_ACCESS_KEY=
-TENDERLY_ACCOUNT_SLUG=
-TENDERLY_PROJECT_SLUG=
-
-# RPCs (MVP targets)
-RPC_BASE_SEPOLIA=
-RPC_ARBITRUM_SEPOLIA=
-
-PORT=3000
-```
-
----
-
-## 7. API
-
-### `POST /plan`
-Request:
-```json
-{ "prompt": "Lend 1000 USDC to the highest-APY USDC vault on Morpho",
-  "walletAddress": "0x...", "chainId": 84532 }
-```
-Response: a `Preview` (human summary + simulation result + artifacts to sign).
-
-### `POST /simulate`
-Re-run simulation for an existing `planId` (e.g. after adjusting slippage). Returns `Preview`.
-
-### `POST /execute`
-Request: `{ "planId": "..." }`. Returns the unsigned artifact(s) for the wallet to sign;
-streams/polls status for cross-chain legs.
-
----
-
-## 8. Adding a new tool (the extensibility playbook)
-
-This is the whole point of the architecture. Two cases:
-
-### Case A — EVM protocol that fits the existing simulator (Aave, Compound, Uniswap)
-1. Create `tools/aave/supply.ts` implementing `Tool`:
-   - `resolve`  → market/reserve lookup via Aave SDK
-   - `validate` → health-factor / balance checks
-   - `build`    → return `{ kind: "evmTx", ... }`
-   - `preview`  → summary card
-2. Register it: `registry.register(aaveSupply)`.
-3. Done. The planner can now pick it; Tenderly already simulates `evmTx`. **No core changes.**
-
-### Case B — Non-EVM venue needing a new simulator (Hyperliquid)
-1. Create `tools/hyperliquid/openPerp.ts`; `build` returns `{ kind: "signedAction", venue: "hyperliquid", ... }`.
-2. Create `simulators/hyperliquid.ts` implementing `Simulator` for `signedAction`
-   (compute fill / margin / liquidation from the venue API). The router auto-selects it.
-3. Register the tool: `registry.register(hyperliquidOpenPerp)`.
-4. Done. Every future perp venue reuses the same simulator.
-
-**The rule:** protocols depend on `core`; `core` never depends on a protocol. Keep that
-arrow pointing one way and you can add protocols indefinitely.
-
----
-
-## 9. Build roadmap
-
-| Phase | Scope | Tools |
-| --- | --- | --- |
-| **0 — MVP** | `/plan → /simulate → /execute` loop on Base Sepolia, non-custodial, Tenderly | `lifi.swap`, `morpho.lend`, `morpho.supplyBorrow`, `morpho.multiply` |
-| **1 — Breadth** | More protocols + a real data backbone (APYs, TVL, prices) | `aave.*`, `compound.*`, `uniswap.*` |
-| **2 — Cross-chain + agents** | LiFi bridging in plans; split monolith into specialized agents; risk scoring | `lifi.bridge`, perps |
-| **3 — Platform** | Strategy templates / creator framework, wallet-based recommendations | — |
-| **4 — Automation & hardening** | Position monitoring, auto-deleverage (account abstraction / session keys), audits, mainnet | — |
-
-### Recommended first build order (Phase 0)
-1. Skeleton: `core/` interfaces + `registry` + `pipeline` + `SimulationRouter`.
-2. `lifi.swap` end-to-end (plan → simulate → preview → execute). Proves the loop.
-3. `morpho.supplyBorrow` (single bundled tx) + LTV math.
-4. `morpho.lend` + "highest-APY vault" discovery.
-5. `morpho.multiply` via bundler + flashloan + embedded LiFi swap.
-6. Frontend chat UI + wallet connect.
-
----
-
-## 10. Security notes
-
-- The backend **never** stores private keys or signs transactions.
-- Nothing is broadcast that hasn't passed simulation.
-- Validate every LLM-produced `ToolCall` against the tool's `paramSchema` before resolving — the LLM is treated as **untrusted input**.
-- Identifiers (vault/market addresses) come from the Resolver/data backbone, never from free-text the LLM invented.
-- Enforce slippage bounds and max-LTV guards in `validate()`, server-side, regardless of what the prompt asked for.
-- Cross-chain: if a later leg fails after a bridge succeeded, funds rest safely as tokens on the destination chain; the executor re-offers the remaining step.
-
----
-
-## Phase 0 build target
-
-Build the Phase 0 skeleton in the order listed in §9. It should implement the contracts
-above: the `core/` pipeline (resolve → validate → build → simulate), an OpenAI planner,
-a Tenderly simulator behind the `SimulationRouter`, and the first plugins (`lifi.swap`,
-`morpho.supplyBorrow`, `morpho.lend`) plus an `aave.supply` stub that demonstrates the
-zero-core-change extensibility model (README §8). Keep all SDK-specific calls isolated in
-`src/protocols/` adapters so version churn never reaches the pipeline.
-
-Suggested dependencies: `viem`, `zod`, `zod-to-json-schema`, `openai`, `fastify`, `dotenv`
-(dev: `typescript`, `tsx`, `@types/node`). REST-based integrations (LiFi quote API, Tenderly
-simulate-bundle API, Morpho GraphQL API) need no extra SDKs; the Morpho bundler is the one
-place a dedicated SDK pays off when you batch actions into a single signature.
